@@ -3772,12 +3772,12 @@ function renderBoard() {
     cols[st].forEach(item => {
       const tags = item.tags || [];
       const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
-      html += '<div class="board-card" data-id="' + item.id + '" draggable="true" ondragstart="boardDragStart(event,\'' + item.id + '\')" ondragend="boardDragEnd()" onclick="if(event.target.closest(\'.board-card-tag[data-tag]\')){var t=event.target.closest(\'.board-card-tag[data-tag]\').dataset.tag;event.stopPropagation();toggleBoardTag(t);return}openBoardDetail(\'' + item.id + '\')">';
+      html += '<div class="board-card" data-id="' + item.id + '" draggable="true" ondragstart="boardDragStart(event,\'' + item.id + '\')" ondragend="boardDragEnd()" onclick="var tg=event.target.closest(\'.board-card-tag[data-tag]\');if(tg){event.stopPropagation();toggleBoardTag(tg.dataset.tag);return}var ss=event.target.closest(\'.board-card-session[data-session]\');if(ss){event.stopPropagation();toggleBoardSession(ss.dataset.session);return}openBoardDetail(\'' + item.id + '\')">';
       if (item.key) html += '<div class="board-card-key">' + esc(item.key) + '</div>';
       html += '<div class="board-card-title">' + esc(item.title) + '</div>';
       if (firstLine) html += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '…' : '') + '</div>';
       html += '<div class="board-card-footer">';
-      if (item.session) html += '<span class="board-card-session">' + esc(item.session) + '</span>';
+      if (item.session) html += '<span class="board-card-session" data-session="' + esc(item.session) + '">' + esc(item.session) + '</span>';
       tags.forEach(t => { html += '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>'; });
       html += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
       html += '</div></div>';
@@ -3828,14 +3828,18 @@ function renderBoard() {
   statuses.forEach(st => { _prevCardRects[st] = cols[st].length; });
 }
 
-// Event delegation for board tag clicks (cards + detail)
+// Event delegation for board tag + session clicks (cards + detail)
 document.getElementById('board-columns').addEventListener('click', function(e) {
   const tag = e.target.closest('.board-card-tag[data-tag]');
-  if (tag) { e.stopPropagation(); e.preventDefault(); toggleBoardTag(tag.dataset.tag); }
+  if (tag) { e.stopPropagation(); e.preventDefault(); toggleBoardTag(tag.dataset.tag); return; }
+  const sess = e.target.closest('.board-card-session[data-session]');
+  if (sess) { e.stopPropagation(); e.preventDefault(); toggleBoardSession(sess.dataset.session); }
 });
 document.getElementById('board-detail-overlay').addEventListener('click', function(e) {
   const tag = e.target.closest('.board-card-tag[data-tag]');
-  if (tag) { e.stopPropagation(); e.preventDefault(); closeBoardDetail(); toggleBoardTag(tag.dataset.tag); }
+  if (tag) { e.stopPropagation(); e.preventDefault(); closeBoardDetail(); toggleBoardTag(tag.dataset.tag); return; }
+  const sess = e.target.closest('.board-card-session[data-session]');
+  if (sess) { e.stopPropagation(); e.preventDefault(); closeBoardDetail(); toggleBoardSession(sess.dataset.session); }
 });
 
 function _populateSessionSelect(selectId, current) {
