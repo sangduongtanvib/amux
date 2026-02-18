@@ -1575,6 +1575,48 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .board-filter-chip.active { background: rgba(88,166,255,0.15); color: var(--accent); border-color: rgba(88,166,255,0.3); }
   .board-filter-chip.active-session { background: rgba(139,148,158,0.15); color: var(--text); border-color: var(--dim); }
+  /* Board toolbar + view toggle */
+  .board-toolbar { display: flex; gap: 8px; align-items: center; }
+  .board-view-toggle { display: flex; gap: 2px; background: rgba(255,255,255,0.04); border-radius: 6px; padding: 2px; flex-shrink: 0; }
+  .bv-btn {
+    padding: 5px 8px; border: none; background: none; color: var(--dim);
+    font-size: 0.85rem; cursor: pointer; border-radius: 4px;
+    -webkit-tap-highlight-color: transparent; transition: all 0.12s; line-height: 1;
+  }
+  .bv-btn.active { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .bv-btn:active { background: rgba(88,166,255,0.1); }
+  /* Session-grouped view */
+  .board-session-group { margin-bottom: 8px; }
+  .board-session-header {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    border-radius: 8px; transition: background 0.12s; user-select: none;
+  }
+  .board-session-header:active { background: rgba(255,255,255,0.04); }
+  .board-session-chevron {
+    font-size: 0.6rem; color: var(--dim); transition: transform 0.2s; flex-shrink: 0; width: 12px;
+  }
+  .board-session-chevron.open { transform: rotate(90deg); }
+  .board-session-name { font-size: 0.82rem; font-weight: 600; color: var(--text); }
+  .board-session-counts {
+    display: flex; gap: 6px; margin-left: auto; flex-shrink: 0;
+  }
+  .board-session-count {
+    font-size: 0.62rem; padding: 2px 6px; border-radius: 8px; font-weight: 500;
+  }
+  .board-session-count.todo { background: rgba(139,148,158,0.12); color: var(--dim); }
+  .board-session-count.doing { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .board-session-count.done { background: rgba(63,185,80,0.15); color: var(--green); }
+  .board-session-items { padding: 0 4px 4px 20px; }
+  .board-session-items .board-card { margin-bottom: 6px; }
+  .board-session-items .board-card .board-status-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0;
+  }
+  .board-status-dot.todo { background: var(--dim); }
+  .board-status-dot.doing { background: var(--yellow); }
+  .board-status-dot.done { background: var(--green); }
+  .board-session-empty { color: rgba(139,148,158,0.4); font-size: 0.75rem; padding: 10px 0; text-align: center; }
+  .board-columns-list { display: block; padding-bottom: 16px; min-height: 200px; }
   /* Board card detail */
   .board-detail-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 12px; -webkit-overflow-scrolling: touch; }
   .board-detail-key { font-size: 0.72rem; color: var(--dim); font-family: "SF Mono","Fira Code",monospace; margin-bottom: 8px; }
@@ -1718,9 +1760,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="cards" class="cards"></div>
 </div>
 <div id="board-view" style="display:none;">
-  <div class="board-search-wrap">
-    <input id="board-search" class="search-input" type="text" placeholder="Search board..." oninput="boardSearchQuery=this.value.toLowerCase();renderBoard()">
-    <button class="search-clear" onclick="document.getElementById('board-search').value='';boardSearchQuery='';renderBoard()">&#x2715;</button>
+  <div class="board-toolbar">
+    <div class="board-search-wrap" style="flex:1;">
+      <input id="board-search" class="search-input" type="text" placeholder="Search board..." oninput="boardSearchQuery=this.value.toLowerCase();renderBoard()">
+      <button class="search-clear" onclick="document.getElementById('board-search').value='';boardSearchQuery='';renderBoard()">&#x2715;</button>
+    </div>
+    <div class="board-view-toggle">
+      <button id="bv-session" class="bv-btn" onclick="setBoardView('session')" title="Group by session">&#x25A4;</button>
+      <button id="bv-status" class="bv-btn" onclick="setBoardView('status')" title="Group by status">&#x2630;</button>
+    </div>
   </div>
   <div class="board-filters" id="board-filters"></div>
   <div class="board-columns" id="board-columns"></div>
@@ -3663,6 +3711,8 @@ let boardFilterTag = null;
 let boardFilterSession = null;
 let boardSearchQuery = '';
 let _boardDragId = null;
+let boardViewMode = localStorage.getItem('cmux_board_view') || 'session';
+let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('cmux_board_collapsed') || '{}');
 
 function switchView(view) {
   activeView = view;
@@ -3826,9 +3876,91 @@ async function boardColDrop(e, col) {
 
 let _prevCardRects = {};
 
+function setBoardView(mode) {
+  boardViewMode = mode;
+  localStorage.setItem('cmux_board_view', mode);
+  renderBoard();
+}
+
+function toggleSessionGroup(name) {
+  _sessionGroupCollapsed[name] = !_sessionGroupCollapsed[name];
+  localStorage.setItem('cmux_board_collapsed', JSON.stringify(_sessionGroupCollapsed));
+  renderBoard();
+}
+
+function _renderBoardCard(item) {
+  const tags = item.tags || [];
+  const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
+  let h = '<div class="board-card" data-id="' + item.id + '" draggable="true" ondragstart="boardDragStart(event,\'' + item.id + '\')" ondragend="boardDragEnd()" onclick="openBoardDetail(\'' + item.id + '\')">';
+  if (item.key) h += '<div class="board-card-key">' + esc(item.key) + '</div>';
+  h += '<div class="board-card-title">';
+  if (boardViewMode === 'session') h += '<span class="board-status-dot ' + (item.status || 'todo') + '"></span>';
+  h += esc(item.title) + '</div>';
+  if (firstLine) h += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '\u2026' : '') + '</div>';
+  h += '<div class="board-card-footer">';
+  if (boardViewMode !== 'session' && item.session) h += '<span class="board-card-session" data-session="' + esc(item.session) + '">' + esc(item.session) + '</span>';
+  tags.forEach(function(t) { h += '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>'; });
+  h += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
+  h += '</div></div>';
+  return h;
+}
+
+function _renderBoardBySession(visible, container) {
+  // Group by session
+  const groups = {};
+  const noSession = [];
+  visible.forEach(function(item) {
+    if (item.session) {
+      if (!groups[item.session]) groups[item.session] = [];
+      groups[item.session].push(item);
+    } else {
+      noSession.push(item);
+    }
+  });
+  const sessionNames = Object.keys(groups).sort();
+  if (noSession.length) sessionNames.push('');
+
+  let html = '';
+  sessionNames.forEach(function(name) {
+    const items = name ? groups[name] : noSession;
+    const collapsed = _sessionGroupCollapsed[name || '__none__'];
+    const todoC = items.filter(function(i) { return i.status === 'todo'; }).length;
+    const doingC = items.filter(function(i) { return i.status === 'doing'; }).length;
+    const doneC = items.filter(function(i) { return i.status === 'done'; }).length;
+    const groupKey = name || '__none__';
+
+    html += '<div class="board-session-group">';
+    html += '<div class="board-session-header" onclick="toggleSessionGroup(\'' + esc(groupKey) + '\')">';
+    html += '<span class="board-session-chevron' + (collapsed ? '' : ' open') + '">\u25B6</span>';
+    html += '<span class="board-session-name">' + (name ? esc(name) : 'No session') + '</span>';
+    html += '<div class="board-session-counts">';
+    if (todoC) html += '<span class="board-session-count todo">' + todoC + ' todo</span>';
+    if (doingC) html += '<span class="board-session-count doing">' + doingC + ' active</span>';
+    if (doneC) html += '<span class="board-session-count done">' + doneC + ' done</span>';
+    html += '</div></div>';
+    if (!collapsed) {
+      html += '<div class="board-session-items">';
+      items.forEach(function(item) { html += _renderBoardCard(item); });
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+
+  if (!sessionNames.length) {
+    html = '<div class="board-session-empty">No board items yet</div>';
+  }
+  container.innerHTML = html;
+}
+
 function renderBoard() {
   renderBoardFilters();
   const container = document.getElementById('board-columns');
+
+  // Update view toggle buttons
+  var bvS = document.getElementById('bv-session');
+  var bvC = document.getElementById('bv-status');
+  if (bvS) bvS.classList.toggle('active', boardViewMode === 'session');
+  if (bvC) bvC.classList.toggle('active', boardViewMode === 'status');
 
   let visible = boardItems;
   if (boardFilterTag) visible = visible.filter(i => (i.tags || []).includes(boardFilterTag));
@@ -3843,6 +3975,16 @@ function renderBoard() {
       (i.tags || []).some(t => t.toLowerCase().includes(q))
     );
   }
+
+  if (boardViewMode === 'session') {
+    container.classList.remove('board-columns');
+    container.classList.add('board-columns-list');
+    _renderBoardBySession(visible, container);
+    return;
+  }
+
+  container.classList.add('board-columns');
+  container.classList.remove('board-columns-list');
 
   const cols = { todo: [], doing: [], done: [] };
   visible.forEach(item => {
@@ -3872,19 +4014,7 @@ function renderBoard() {
       const hints = { todo: 'Nothing here yet', doing: 'Nothing in progress', done: 'Nothing done yet' };
       html += '<div class="board-empty">' + hints[st] + '</div>';
     }
-    cols[st].forEach(item => {
-      const tags = item.tags || [];
-      const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
-      html += '<div class="board-card" data-id="' + item.id + '" draggable="true" ondragstart="boardDragStart(event,\'' + item.id + '\')" ondragend="boardDragEnd()" onclick="var tg=event.target.closest(\'.board-card-tag[data-tag]\');if(tg){event.stopPropagation();toggleBoardTag(tg.dataset.tag);return}var ss=event.target.closest(\'.board-card-session[data-session]\');if(ss){event.stopPropagation();toggleBoardSession(ss.dataset.session);return}openBoardDetail(\'' + item.id + '\')">';
-      if (item.key) html += '<div class="board-card-key">' + esc(item.key) + '</div>';
-      html += '<div class="board-card-title">' + esc(item.title) + '</div>';
-      if (firstLine) html += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '…' : '') + '</div>';
-      html += '<div class="board-card-footer">';
-      if (item.session) html += '<span class="board-card-session" data-session="' + esc(item.session) + '">' + esc(item.session) + '</span>';
-      tags.forEach(t => { html += '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>'; });
-      html += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
-      html += '</div></div>';
-    });
+    cols[st].forEach(item => { html += _renderBoardCard(item); });
     if (st === 'done' && cols[st].length > 0) {
       html += '<button class="board-add-btn" style="color:var(--red);border-color:rgba(248,81,73,0.2);" onclick="clearDone()">Clear done</button>';
     }
