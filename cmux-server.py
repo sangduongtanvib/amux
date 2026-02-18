@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""cc serve — web dashboard for Claude Code session manager."""
+"""cmux serve — web dashboard for Claude Code session manager."""
 
 # ═══════════════════════════════════════════
 # CONFIGURATION & GLOBALS
@@ -17,7 +17,12 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-CC_HOME = Path(os.environ.get("CC_HOME", Path.home() / ".cc"))
+# Support both ~/.cmux (new) and ~/.cc (old) for migration
+_cmux_home = Path.home() / ".cmux"
+_cc_home = Path.home() / ".cc"
+if not _cmux_home.exists() and _cc_home.exists():
+    _cc_home.rename(_cmux_home)
+CC_HOME = Path(os.environ.get("CC_HOME", _cmux_home))
 CC_SESSIONS = CC_HOME / "sessions"
 CLAUDE_HOME = Path.home() / ".claude"
 
@@ -26,7 +31,7 @@ CLAUDE_HOME = Path.home() / ".claude"
 # ═══════════════════════════════════════════
 
 def parse_env_file(path: Path) -> dict:
-    """Parse a cc session .env file into a dict."""
+    """Parse a cmux session .env file into a dict."""
     data = {}
     for line in path.read_text().splitlines():
         line = line.strip()
@@ -47,7 +52,7 @@ def parse_env_file(path: Path) -> dict:
 
 
 def _write_env(path: Path, cfg: dict):
-    """Write a cfg dict back to a cc .env file."""
+    """Write a cfg dict back to a cmux .env file."""
     lines = [f'# updated: {__import__("datetime").datetime.now().isoformat()}']
     for k, v in cfg.items():
         lines.append(f'{k}="{v}"')
@@ -59,7 +64,16 @@ def _write_env(path: Path, cfg: dict):
 # ═══════════════════════════════════════════
 
 def tmux_name(session: str) -> str:
-    return f"cc-{session}"
+    # Migrate cc-* → cmux-* if old name exists
+    old = f"cc-{session}"
+    new = f"cmux-{session}"
+    try:
+        r = subprocess.run(["tmux", "has-session", "-t", old], capture_output=True)
+        if r.returncode == 0:
+            subprocess.run(["tmux", "rename-session", "-t", old, new], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    return new
 
 
 def is_running(session: str) -> bool:
@@ -355,7 +369,7 @@ def send_keys(name: str, keys: str) -> tuple[bool, str]:
 
 
 def list_tmux_sessions() -> list:
-    """List all tmux sessions with their working dirs, excluding already-registered cc sessions."""
+    """List all tmux sessions with their working dirs, excluding already-registered cmux sessions."""
     registered = set()
     if CC_SESSIONS.is_dir():
         for f in CC_SESSIONS.glob("*.env"):
@@ -404,8 +418,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d1117">
 <link rel="manifest" href="/manifest.json">
-<title>cc</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230d1117'/><text x='50' y='68' font-family='system-ui' font-size='52' font-weight='700' fill='%2358a6ff' text-anchor='middle'>cc</text></svg>">
+<title>cmux</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230d1117'/><text x='50' y='68' font-family='system-ui' font-size='40' font-weight='700' fill='%2358a6ff' text-anchor='middle'>cmux</text></svg>">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -911,7 +925,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <body>
 
 <div class="header-row">
-  <h1>cc</h1>
+  <h1>cmux</h1>
   <div style="display:flex;gap:8px;align-items:center;">
     <span id="conn-status" class="conn-status online" onclick="showQueueModal()">&#x25CF; Connected</span>
     <div class="search-wrap" id="search-wrap">
@@ -1083,7 +1097,15 @@ let lastPeekHTML = '';
 
 // Connection & offline state
 let online = true;
-let offlineQueue = JSON.parse(localStorage.getItem('cc_offline_queue') || '[]');
+// Migrate localStorage keys from cc_ to cmux_
+['offline_queue','sessions_cache'].forEach(k => {
+  const old = localStorage.getItem('cc_' + k);
+  if (old && !localStorage.getItem('cmux_' + k)) {
+    localStorage.setItem('cmux_' + k, old);
+    localStorage.removeItem('cc_' + k);
+  }
+});
+let offlineQueue = JSON.parse(localStorage.getItem('cmux_offline_queue') || '[]');
 let consecutiveFailures = 0;
 
 // Tailscale URL rewriting
@@ -1194,7 +1216,7 @@ function closeQueueModal() {
 }
 function clearQueue() {
   offlineQueue = [];
-  localStorage.removeItem('cc_offline_queue');
+  localStorage.removeItem('cmux_offline_queue');
   updateConnectionStatus();
   closeQueueModal();
   showToast('Queue cleared');
@@ -1218,14 +1240,14 @@ async function apiCall(url, options) {
       if (consecutiveFailures >= 3) setOnline(false);
       // Queue the failed mutation
       offlineQueue.push({ url, options: { method: options.method, headers: options.headers, body: options.body }, timestamp: Date.now() });
-      localStorage.setItem('cc_offline_queue', JSON.stringify(offlineQueue));
+      localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
       updateConnectionStatus();
       showToast('Queued (' + offlineQueue.length + ' pending)');
       return null;
     }
   } else {
     offlineQueue.push({ url, options: { method: options.method, headers: options.headers, body: options.body }, timestamp: Date.now() });
-    localStorage.setItem('cc_offline_queue', JSON.stringify(offlineQueue));
+    localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
     updateConnectionStatus();
     showToast('Queued (' + offlineQueue.length + ' pending)');
     return null;
@@ -1265,7 +1287,7 @@ async function replayQueue() {
   if (!offlineQueue.length) return;
   const raw = [...offlineQueue];
   offlineQueue = [];
-  localStorage.removeItem('cc_offline_queue');
+  localStorage.removeItem('cmux_offline_queue');
   // Reconcile before replaying
   const queue = reconcileQueue(raw);
   const skipped = raw.length - queue.length;
@@ -1288,7 +1310,7 @@ async function replayQueue() {
     }
   }
   if (failed) {
-    localStorage.setItem('cc_offline_queue', JSON.stringify(offlineQueue));
+    localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
     showToast(synced + ' synced, ' + failed + ' re-queued');
   } else {
     showToast('All ' + synced + ' operation' + (synced === 1 ? '' : 's') + ' synced');
@@ -1309,7 +1331,7 @@ async function fetchSessions() {
     if (j !== lastSessionsJSON) {
       lastSessionsJSON = j;
       sessions = data;
-      localStorage.setItem('cc_sessions_cache', j);
+      localStorage.setItem('cmux_sessions_cache', j);
       render();
     }
   } catch(e) {
@@ -1318,7 +1340,7 @@ async function fetchSessions() {
     if (consecutiveFailures >= 3 && online) {
       setOnline(false);
       // Load cached sessions for offline view
-      const cached = localStorage.getItem('cc_sessions_cache');
+      const cached = localStorage.getItem('cmux_sessions_cache');
       if (cached) {
         try {
           sessions = JSON.parse(cached);
@@ -2369,8 +2391,8 @@ if ('serviceWorker' in navigator) {
 # ═══════════════════════════════════════════
 
 PWA_MANIFEST = json.dumps({
-    "name": "cc — Claude Code Manager",
-    "short_name": "cc",
+    "name": "cmux — Claude Code Multiplexer",
+    "short_name": "cmux",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#0d1117",
@@ -2383,7 +2405,7 @@ PWA_MANIFEST = json.dumps({
 
 # Minimal service worker: cache the app shell so it loads offline
 SERVICE_WORKER = r"""
-const CACHE = 'cc-v1';
+const CACHE = 'cmux-v1';
 const SHELL = ['/'];
 
 self.addEventListener('install', e => {
@@ -2423,28 +2445,29 @@ self.addEventListener('fetch', e => {
 
 
 def _generate_icon_png(size):
-    """Generate a simple PNG icon with 'cc' text. Returns raw PNG bytes."""
+    """Generate a simple PNG icon for cmux. Returns raw PNG bytes."""
     import struct, zlib
-    # Create a simple dark icon with the letters "cc" rendered as pixel art
     w = h = size
-    # Build raw RGBA image data
     rows = []
     bg = (13, 17, 23, 255)       # #0d1117
     fg = (88, 166, 255, 255)     # #58a6ff
     for y in range(h):
         row = bytearray([0])  # filter byte
         for x in range(w):
-            # Draw "cc" as two C shapes in the center
             cx, cy = x / w, y / h
-            # Background with rounded corner feel
-            # Letter region: center 60% of icon
+            # Draw 4 vertical bars (multiplexer symbol) with a > connector
             in_letter = False
-            for offset in (-0.14, 0.14):
-                lx = (cx - 0.5 - offset) / 0.12
-                ly = (cy - 0.5) / 0.22
-                # C shape: circle with right side open
-                dist = (lx * lx + ly * ly) ** 0.5
-                if 0.6 < dist < 1.0 and lx < 0.3:
+            # Four bars at different x positions
+            for bx in (0.25, 0.40, 0.55, 0.70):
+                if abs(cx - bx) < 0.035 and 0.25 < cy < 0.75:
+                    in_letter = True
+            # Chevron > on the right side
+            mid_y = 0.5
+            chev_x = 0.82
+            dy = abs(cy - mid_y)
+            if 0.15 < dy < 0.25:
+                expected_x = chev_x + (0.25 - dy) * 0.4
+                if abs(cx - expected_x) < 0.025:
                     in_letter = True
             px = fg if in_letter else bg
             row.extend(px)
@@ -2591,9 +2614,9 @@ class CCHandler(BaseHTTPRequestHandler):
             cc_name = body.get("name", "").strip()
             if not tmux_session:
                 return self._json({"error": "missing tmux_name"}, 400)
-            # Derive cc name: strip "cc-" prefix if present, or use as-is
+            # Derive name: strip cmux-/cc- prefix if present, or use as-is
             if not cc_name:
-                cc_name = tmux_session.removeprefix("cc-")
+                cc_name = tmux_session.removeprefix("cmux-").removeprefix("cc-")
             cc_name = re.sub(r'[^a-zA-Z0-9_-]', '-', cc_name)
             env_file = CC_SESSIONS / f"{cc_name}.env"
             if env_file.exists():
@@ -2610,7 +2633,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 cwd = ""
             cfg = {"CC_DIR": cwd, "CC_FLAGS": ""}
             _write_env(env_file, cfg)
-            # Rename the tmux session to match cc convention
+            # Rename the tmux session to match cmux convention
             expected_tmux = tmux_name(cc_name)
             if tmux_session != expected_tmux:
                 try:
@@ -2871,7 +2894,7 @@ class CCHandler(BaseHTTPRequestHandler):
 # ═══════════════════════════════════════════
 
 def _watch_self(server):
-    """Watch cc-server.py for changes and restart on modification."""
+    """Watch cmux-server.py for changes and restart on modification."""
     script = Path(__file__).resolve()
     mtime = script.stat().st_mtime
     while True:
@@ -2893,11 +2916,11 @@ def main():
     lan_ip = get_lan_ip()
 
     server = ThreadingHTTPServer(("0.0.0.0", port), CCHandler)
-    print(f"\033[1m\033[34mcc\033[0m web dashboard running")
+    print(f"\033[1m\033[34mcmux\033[0m web dashboard running")
     print(f"  Local:   http://localhost:{port}")
     print(f"  Network: http://{lan_ip}:{port}")
     print(f"\n  Open on your phone → http://{lan_ip}:{port}")
-    print(f"\033[2m  Auto-reload active — editing cc-server.py will restart\033[0m")
+    print(f"\033[2m  Auto-reload active — editing cmux-server.py will restart\033[0m")
     print(f"\n\033[2mPress Ctrl-C to stop\033[0m")
 
     # Start file watcher thread
