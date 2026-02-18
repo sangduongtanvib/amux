@@ -1527,6 +1527,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .conn-status.offline::before { background: #f87171; }
 
+  /* Loading spinner */
+  @keyframes _spin { to { transform: rotate(360deg); } }
+  .loading-spinner {
+    width: 18px; height: 18px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: _spin 0.8s linear infinite;
+    display: inline-block; vertical-align: middle; margin-right: 8px;
+  }
+
   /* Queue modal */
   .queue-overlay {
     display: none; position: fixed; inset: 0; background: rgba(1,4,9,0.85);
@@ -2129,6 +2138,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
       <div id="server-list"></div>
     </div>
+    <div id="debug-panel" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <div style="font-size:0.78rem;font-weight:600;">Connection</div>
+        <button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="pingServer()">Ping</button>
+      </div>
+      <div id="debug-info" style="font-size:0.7rem;font-family:monospace;color:var(--dim);line-height:1.6;"></div>
+    </div>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;">
       <button class="btn" onclick="document.getElementById('about-overlay').classList.remove('active')">Close</button>
     </div>
@@ -2170,6 +2186,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 // ═══════ STATE & GLOBALS ═══════
 const API = '';
 let sessions = [];
+let _initialLoad = true;   // true until first data arrives from server
+let _lastDataTime = null;  // timestamp of last successful data
+let _debugLog = [];        // recent connection events (capped at 12)
 let expanded = null;
 let searchQuery = '';
 let activeTag = '';
@@ -2560,6 +2579,8 @@ async function fetchSessions() {
     const r = await fetch(API + '/api/sessions');
     const data = await r.json();
     consecutiveFailures = 0;
+    _lastDataTime = Date.now();
+    if (_initialLoad) { _initialLoad = false; }
     if (!online) setOnline(true);
     const j = JSON.stringify(data);
     if (j !== lastSessionsJSON) {
@@ -2594,8 +2615,12 @@ function render() {
     tagEl.innerHTML = '';
   }
   if (!sessions.length && !drafts.length) {
-    el.innerHTML = '<div class="empty">No sessions yet.<br>Tap <strong>+</strong> to create one.' +
-      (!online ? '<br><span style="color:var(--yellow)">You\'re offline — sessions created now will sync when connected.</span>' : '') + '</div>';
+    if (_initialLoad) {
+      el.innerHTML = '<div class="empty"><span class="loading-spinner"></span>Connecting to server…</div>';
+    } else {
+      el.innerHTML = '<div class="empty">No sessions yet.<br>Tap <strong>+</strong> to create one.' +
+        (!online ? '<br><span style="color:var(--yellow)">You\'re offline — sessions created now will sync when connected.</span>' : '') + '</div>';
+    }
     return;
   }
 
@@ -4951,6 +4976,8 @@ function connectSSE() {
 
   _sse.onmessage = function(e) {
     _sseRetries = 0;
+    _lastDataTime = Date.now();
+    if (_initialLoad) { _initialLoad = false; render(); }
     if (!_liveSSE) { _liveSSE = true; updateConnectionStatus(); }
     if (!online) setOnline(true);
     try {
@@ -4980,8 +5007,10 @@ function connectSSE() {
     _liveSSE = false;
     _sse.close();
     _sse = null;
+    _dbgLog('SSE error (retry ' + _sseRetries + ')');
     updateConnectionStatus();
     if (_sseRetries >= 3) {
+      _dbgLog('SSE failed — switching to polling');
       enablePollingFallback();
     } else {
       setTimeout(connectSSE, 2000 * _sseRetries);
@@ -5091,10 +5120,67 @@ function fmtTokens(n) {
   return String(n);
 }
 
+function _dbgLog(msg) {
+  _debugLog.unshift('[' + new Date().toLocaleTimeString() + '] ' + msg);
+  if (_debugLog.length > 12) _debugLog.length = 12;
+}
+
+function _timeSince(ts) {
+  if (!ts) return 'never';
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+function renderDebugInfo() {
+  const el = document.getElementById('debug-info');
+  if (!el) return;
+  const mode = !online ? '🔴 Offline' : _liveSSE ? '🟢 Live (SSE)' : '🟡 Polling (5s)';
+  const rows = [
+    ['Mode', mode],
+    ['Last data', _timeSince(_lastDataTime)],
+    ['Server', location.host],
+    ['Sessions', sessions.length + ' loaded'],
+    ['SSE retries', _sseRetries],
+    ['Queue', offlineQueue.length + ' pending'],
+  ];
+  let html = rows.map(([k,v]) =>
+    '<div style="display:flex;justify-content:space-between;gap:8px;">' +
+    '<span style="color:var(--dim)">' + k + '</span>' +
+    '<span style="color:var(--text);text-align:right">' + v + '</span></div>'
+  ).join('');
+  if (_debugLog.length) {
+    html += '<div style="margin-top:6px;border-top:1px solid var(--border);padding-top:4px;color:var(--dim)">' +
+      _debugLog.slice(0, 5).join('<br>') + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+async function pingServer() {
+  const btn = event.target;
+  btn.textContent = '…';
+  btn.disabled = true;
+  const t0 = Date.now();
+  try {
+    await fetch(API + '/api/sessions');
+    const ms = Date.now() - t0;
+    _dbgLog('Ping OK ' + ms + 'ms');
+    showToast('Server OK — ' + ms + 'ms');
+  } catch(e) {
+    _dbgLog('Ping FAILED: ' + e.message);
+    showToast('Ping failed: ' + e.message);
+  }
+  btn.textContent = 'Ping';
+  btn.disabled = false;
+  renderDebugInfo();
+}
+
 function openAbout() {
   document.getElementById('about-overlay').classList.add('active');
   document.getElementById('add-server-form').style.display = 'none';
   renderServerList();
+  renderDebugInfo();
   const el = document.getElementById('daily-stats');
   el.innerHTML = '<div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading...</div>';
   fetch(API + '/api/stats/daily').then(r => r.json()).then(data => {
