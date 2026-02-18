@@ -1249,6 +1249,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .header-add-menu.open { display: block; }
   .header-add-menu .card-menu-item { padding: 12px 16px; }
 
+  /* Zoom controls */
+  .zoom-controls {
+    display: flex; align-items: center; gap: 2px; flex-shrink: 0;
+    background: rgba(255,255,255,0.04); border-radius: 6px; padding: 2px;
+  }
+  .zoom-btn {
+    width: 28px; height: 28px; border: none; background: none; color: var(--dim);
+    font-size: 0.85rem; font-weight: 700; cursor: pointer; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent; transition: all 0.12s; line-height: 1;
+  }
+  .zoom-btn:active { background: rgba(88,166,255,0.1); color: var(--accent); }
+  .zoom-level {
+    font-size: 0.6rem; color: var(--dim); min-width: 28px; text-align: center;
+    cursor: pointer; -webkit-tap-highlight-color: transparent; user-select: none;
+  }
+  .zoom-level:active { color: var(--accent); }
+
   /* Peek search highlight */
   .peek-highlight { background: rgba(210,153,34,0.4); color: #fff; border-radius: 2px; }
 
@@ -1735,6 +1753,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </button>
       <div class="active-dropdown" id="active-dropdown"></div>
     </div>
+    <div class="zoom-controls">
+      <button class="zoom-btn" onclick="zoomOut()" title="Zoom out">&#x2212;</button>
+      <span class="zoom-level" id="zoom-level" onclick="resetZoom()" title="Reset zoom">100%</span>
+      <button class="zoom-btn" onclick="zoomIn()" title="Zoom in">+</button>
+    </div>
     <div class="header-add-wrap">
       <button class="header-add-btn" id="add-btn" onclick="event.stopPropagation();toggleAddMenu()">+</button>
       <div class="header-add-menu" id="add-menu">
@@ -1990,6 +2013,35 @@ let peekTimer = null;
 let peekSessionDir = '';
 let peekSearchQuery = '';
 let lastPeekHTML = '';
+
+// ═══════ ZOOM ═══════
+const ZOOM_STEPS = [50, 60, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 150, 175, 200];
+let _zoomLevel = parseInt(localStorage.getItem('cmux_zoom') || '100', 10);
+function _applyZoom() {
+  document.documentElement.style.zoom = (_zoomLevel / 100);
+  var el = document.getElementById('zoom-level');
+  if (el) el.textContent = _zoomLevel + '%';
+  localStorage.setItem('cmux_zoom', _zoomLevel);
+}
+function zoomIn() {
+  var idx = ZOOM_STEPS.indexOf(_zoomLevel);
+  if (idx === -1) { for (var i = 0; i < ZOOM_STEPS.length; i++) { if (ZOOM_STEPS[i] > _zoomLevel) { idx = i - 1; break; } } if (idx === -1) idx = ZOOM_STEPS.length - 2; }
+  if (idx < ZOOM_STEPS.length - 1) { _zoomLevel = ZOOM_STEPS[idx + 1]; _applyZoom(); }
+}
+function zoomOut() {
+  var idx = ZOOM_STEPS.indexOf(_zoomLevel);
+  if (idx === -1) { for (var i = ZOOM_STEPS.length - 1; i >= 0; i--) { if (ZOOM_STEPS[i] < _zoomLevel) { idx = i + 1; break; } } if (idx === -1) idx = 1; }
+  if (idx > 0) { _zoomLevel = ZOOM_STEPS[idx - 1]; _applyZoom(); }
+}
+function resetZoom() { _zoomLevel = 100; _applyZoom(); }
+// Apply saved zoom on load
+if (_zoomLevel !== 100) _applyZoom();
+// Keyboard shortcuts: Cmd/Ctrl +/- for zoom
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
+  else if ((e.metaKey || e.ctrlKey) && e.key === '-') { e.preventDefault(); zoomOut(); }
+  else if ((e.metaKey || e.ctrlKey) && e.key === '0') { e.preventDefault(); resetZoom(); }
+});
 
 // Connection & offline state
 let online = true;
