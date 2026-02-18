@@ -1106,6 +1106,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .file-overlay-body.markdown em { font-style: italic; }
   .file-overlay-body.markdown hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
 
+  /* File explorer */
+  .explore-breadcrumb { font-size: 0.8rem; overflow-x: auto; white-space: nowrap; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .explore-breadcrumb::-webkit-scrollbar { display: none; }
+  .explore-crumb { color: var(--accent); cursor: pointer; }
+  .explore-crumb:hover { text-decoration: underline; }
+  .explore-row { display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--border); cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .explore-row:active { background: var(--hover); }
+  .explore-icon { font-size: 1rem; flex-shrink: 0; line-height: 1; }
+  .explore-name { font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .explore-size { font-size: 0.72rem; color: var(--dim); flex-shrink: 0; }
+
   /* Connect session list */
   .connect-item {
     display: flex; align-items: center; justify-content: space-between;
@@ -1939,6 +1950,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span class="search-count" id="peek-search-count"></span>
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
+      <button class="btn" id="peek-explore-btn" onclick="openExplore(peekSessionDir)" title="Browse files">&#x1F4C2;</button>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
   </div>
@@ -2066,6 +2078,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" onclick="closeFilePreview()">Close</button>
   </div>
   <div id="file-body" class="file-overlay-body"></div>
+</div>
+
+<!-- File explorer overlay -->
+<div id="explore-overlay" class="file-overlay" style="z-index:250;">
+  <div class="file-overlay-header">
+    <div class="explore-breadcrumb" id="explore-breadcrumb" style="flex:1;margin-right:8px;"></div>
+    <button class="btn" onclick="closeExplore()">Close</button>
+  </div>
+  <div id="explore-body" class="file-overlay-body" style="padding:0;overflow-y:auto;"></div>
 </div>
 
 <script>
@@ -2572,7 +2593,7 @@ function render() {
           <div class="card-menu-item danger" onclick="event.stopPropagation();deleteSession('${s.name}')"><span class="mi">&#x2716;</span> Delete</div>
         </div>
       </div>
-      ${s.dir ? `<div class="card-dir">${esc(s.dir)}</div>` : ''}
+      ${s.dir ? `<div class="card-dir" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</div>` : ''}
       ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
@@ -3213,11 +3234,12 @@ function closePeek() {
   }, {passive: true});
 })();
 
-// Tailscale URL rewriting
+// Rewrite localhost/127.0.0.1/0.0.0.0 URLs to use the actual server hostname
+// so links work when viewing the dashboard from another device
 function rewriteLocalhostUrls(html) {
   if (!remoteHostname) return html;
-  return html.replace(/http:\/\/(localhost|127\.0\.0\.1)(:\d+)/g,
-    (match, host, port) => 'http://' + remoteHostname + port);
+  return html.replace(/(https?):\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/g,
+    (match, scheme, host, port) => scheme + '://' + remoteHostname + (port || ''));
 }
 
 // ═══════ PEEK MODE ═══════
@@ -3594,6 +3616,74 @@ async function openFilePreview(path) {
 
 function closeFilePreview() {
   document.getElementById('file-overlay').classList.remove('active');
+}
+
+// ═══════ FILE EXPLORER ═══════
+let _explorePath = '';
+function openExplore(startPath) {
+  _explorePath = startPath || '/';
+  document.getElementById('explore-overlay').classList.add('active');
+  document.body.style.overflow = 'hidden';
+  loadExplore(_explorePath);
+}
+function closeExplore() {
+  document.getElementById('explore-overlay').classList.remove('active');
+  document.body.style.overflow = '';
+}
+function _fmtSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(0) + 'K';
+  return (bytes / 1048576).toFixed(1) + 'M';
+}
+async function loadExplore(path) {
+  const body = document.getElementById('explore-body');
+  body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
+  _explorePath = path;
+  // Build breadcrumb
+  const parts = path.split('/').filter(Boolean);
+  let crumbHtml = `<span class="explore-crumb" onclick="loadExplore('/')">/</span>`;
+  let cum = '';
+  for (const part of parts) {
+    cum += '/' + part;
+    const cp = cum;
+    crumbHtml += `<span class="explore-crumb" onclick="loadExplore('${cp.replace(/'/g,"\\'")}')"> ${esc(part)}</span><span style="color:var(--dim)">/</span>`;
+  }
+  document.getElementById('explore-breadcrumb').innerHTML = crumbHtml;
+  try {
+    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path));
+    const data = await r.json();
+    if (data.error) { body.innerHTML = `<div style="padding:16px;color:var(--dim)">${esc(data.error)}</div>`; return; }
+    body.innerHTML = '';
+    // Back row if not at root
+    if (data.parent && data.parent !== data.path) {
+      const back = document.createElement('div');
+      back.className = 'explore-row';
+      back.innerHTML = `<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>`;
+      back.onclick = () => loadExplore(data.parent);
+      body.appendChild(back);
+    }
+    if (!data.entries.length) {
+      body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
+      return;
+    }
+    for (const entry of data.entries) {
+      const row = document.createElement('div');
+      row.className = 'explore-row';
+      const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
+      const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
+      row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>`;
+      const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+      if (entry.type === 'dir') {
+        row.onclick = () => loadExplore(entryPath);
+      } else {
+        row.onclick = () => openFilePreview(entryPath);
+      }
+      body.appendChild(row);
+    }
+  } catch(e) {
+    body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
+  }
 }
 
 function renderMarkdown(md) {
@@ -5273,6 +5363,33 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json(results)
             except PermissionError:
                 return self._json([])
+
+        # GET /api/ls?path=...
+        if method == "GET" and path == "/api/ls":
+            ls_path = qs.get("path", [""])[0]
+            if not ls_path:
+                return self._json({"error": "missing path"}, 400)
+            p = Path(ls_path).expanduser().resolve()
+            if not p.is_dir():
+                return self._json({"error": "not a directory"}, 400)
+            try:
+                entries = []
+                for item in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                    if item.name.startswith('.'):
+                        continue
+                    try:
+                        st = item.stat()
+                        entries.append({
+                            "name": item.name,
+                            "type": "dir" if item.is_dir() else "file",
+                            "size": st.st_size if item.is_file() else None,
+                            "modified": int(st.st_mtime),
+                        })
+                    except (PermissionError, OSError):
+                        pass
+                return self._json({"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": entries})
+            except PermissionError:
+                return self._json({"error": "permission denied"}, 403)
 
         # ── Board API ──
         if path == "/api/board" or path.startswith("/api/board/"):
