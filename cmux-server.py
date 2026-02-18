@@ -2007,13 +2007,13 @@ let peekTimer = null;
 let peekSessionDir = '';
 let peekSearchQuery = '';
 let lastPeekHTML = '';
+const _peekDrafts = {};  // session name → command text
 
 // ═══════ ZOOM ═══════
 const ZOOM_STEPS = [50, 60, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 150, 175, 200];
-let _zoomLevel = parseInt(localStorage.getItem('cmux_zoom') || '100', 10);
+let _zoomLevel = 100;
 function _applyZoom() {
   document.documentElement.style.zoom = (_zoomLevel / 100);
-  localStorage.setItem('cmux_zoom', _zoomLevel);
 }
 function zoomIn() {
   var idx = ZOOM_STEPS.indexOf(_zoomLevel);
@@ -2026,8 +2026,6 @@ function zoomOut() {
   if (idx > 0) { _zoomLevel = ZOOM_STEPS[idx - 1]; _applyZoom(); }
 }
 function resetZoom() { _zoomLevel = 100; _applyZoom(); }
-// Apply saved zoom on load
-if (_zoomLevel !== 100) _applyZoom();
 // Keyboard shortcuts: Cmd/Ctrl +/- for zoom
 document.addEventListener('keydown', function(e) {
   if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
@@ -3050,10 +3048,19 @@ function openPeek(name) {
   lastPeekHTML = '';
   const searchInp = document.getElementById('peek-search');
   if (searchInp) searchInp.value = '';
-  peekCmdOpen = false;
-  document.getElementById('peek-cmd-row').classList.remove('open');
-  document.getElementById('peek-cmd-toggle').innerHTML = '&#x25B2; Send command';
-  document.getElementById('peek-cmd-input').value = '';
+  const draft = _peekDrafts[name] || '';
+  const cmdInp = document.getElementById('peek-cmd-input');
+  cmdInp.value = draft;
+  autoGrow(cmdInp);
+  if (draft) {
+    peekCmdOpen = true;
+    document.getElementById('peek-cmd-row').classList.add('open');
+    document.getElementById('peek-cmd-toggle').innerHTML = '&#x25BC; Send command';
+  } else {
+    peekCmdOpen = false;
+    document.getElementById('peek-cmd-row').classList.remove('open');
+    document.getElementById('peek-cmd-toggle').innerHTML = '&#x25B2; Send command';
+  }
   document.getElementById('peek-title').textContent = name;
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   updateConnectionStatus();
@@ -3087,6 +3094,13 @@ function copyPeekContent() {
 }
 
 function closePeek() {
+  // Save command draft for this session
+  if (peekSession) {
+    const inp = document.getElementById('peek-cmd-input');
+    const val = inp ? inp.value : '';
+    if (val.trim()) _peekDrafts[peekSession] = val;
+    else delete _peekDrafts[peekSession];
+  }
   peekSession = null;
   peekSearchQuery = '';
   lastPeekHTML = '';
@@ -3282,6 +3296,7 @@ async function sendPeekCmd() {
   if (!text) return;
   inp.value = '';
   inp.style.height = 'auto';
+  delete _peekDrafts[peekSession];
   await doSend(peekSession, text);
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
@@ -4180,21 +4195,23 @@ async function saveBoardEdit() {
 // ── Board detail (full-screen) ──
 let boardDetailId = null;
 let boardDetailStatus = 'todo';
+const _boardDrafts = {};  // item id → { title, desc, session, status }
 
 function openBoardDetail(id) {
   const item = boardItems.find(i => i.id === id);
   if (!item) return;
   boardDetailId = id;
-  boardDetailStatus = item.status || 'todo';
+  const draft = _boardDrafts[id];
+  boardDetailStatus = draft ? draft.status : (item.status || 'todo');
   const titleEl = document.getElementById('bd-title');
-  titleEl.value = item.title;
+  titleEl.value = draft ? draft.title : item.title;
   titleEl.style.height = 'auto';
   titleEl.style.height = titleEl.scrollHeight + 'px';
-  document.getElementById('bd-desc').value = item.desc || '';
+  document.getElementById('bd-desc').value = draft ? draft.desc : (item.desc || '');
   _renderDetailStatusBtns();
   const keyEl = document.getElementById('bd-key');
   if (keyEl) keyEl.textContent = item.key || '';
-  _populateSessionSelect('bd-session', item.session || '');
+  _populateSessionSelect('bd-session', draft ? draft.session : (item.session || ''));
   boardDetailTab('edit');
   const meta = document.getElementById('bd-meta');
   const parts = [];
@@ -4242,6 +4259,23 @@ function boardDetailSetStatus(st) {
 }
 
 function closeBoardDetail() {
+  // Save unsaved edits as draft
+  if (boardDetailId) {
+    const item = boardItems.find(i => i.id === boardDetailId);
+    if (item) {
+      const t = (document.getElementById('bd-title').value || '').trim();
+      const d = (document.getElementById('bd-desc').value || '').trim();
+      const sel = document.getElementById('bd-session');
+      const s = sel ? sel.value : (item.session || '');
+      const st = boardDetailStatus;
+      // Only save draft if something actually differs from saved state
+      if (t !== (item.title || '') || d !== (item.desc || '') || s !== (item.session || '') || st !== (item.status || 'todo')) {
+        _boardDrafts[boardDetailId] = { title: t, desc: d, session: s, status: st };
+      } else {
+        delete _boardDrafts[boardDetailId];
+      }
+    }
+  }
   document.getElementById('board-detail-overlay').classList.remove('active');
   boardDetailId = null;
 }
@@ -4295,6 +4329,7 @@ async function boardDetailSave() {
     }
   }
   await updateBoardItem(boardDetailId, changes);
+  delete _boardDrafts[boardDetailId];
   document.getElementById('bd-save-status').textContent = 'Saved';
   setTimeout(() => {
     const el = document.getElementById('bd-save-status');
