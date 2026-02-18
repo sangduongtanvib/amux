@@ -5612,8 +5612,9 @@ _icon_cache = {}
 
 class CCHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        # Quieter logging: just method + path
-        sys.stderr.write(f"  {args[0]}\n")
+        # Log client IP + request so we can distinguish phone vs desktop
+        ip = self.client_address[0]
+        sys.stderr.write(f"  [{ip}] {args[0]}\n")
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
