@@ -2660,6 +2660,7 @@ function render() {
         ${!online ? '<span class="cached-badge">cached</span>' : ''}
         <button class="card-menu-btn" onclick="event.stopPropagation();toggleMenu('${s.name}')" title="Options">&#x22EF;</button>
         <div class="card-menu" id="menu-${s.name}">
+          <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openPeek('${s.name}')"><span class="mi">&#x1F4BB;</span> Peek terminal</div>
           ${s.running ? `<div class="card-menu-item danger" onclick="event.stopPropagation();doStop('${s.name}')"><span class="mi">&#x23F9;</span> Stop</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
