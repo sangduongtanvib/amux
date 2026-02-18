@@ -9,6 +9,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -893,11 +894,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .queue-item .queue-time { color: var(--yellow); font-size: 0.7rem; }
   .queue-empty { color: var(--dim); text-align: center; padding: 16px; font-size: 0.85rem; }
 
-  /* Cached indicator */
-  .cached-badge {
+  /* Cached / draft indicators */
+  .cached-badge, .draft-badge, .pending-badge {
     font-size: 0.6rem; padding: 1px 5px; border-radius: 3px;
-    background: rgba(139,148,158,0.15); color: var(--dim);
     font-weight: 600; text-transform: uppercase; margin-left: 6px;
+  }
+  .cached-badge { background: rgba(139,148,158,0.15); color: var(--dim); }
+  .draft-badge { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .pending-badge { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .draft-prompt {
+    font-size: 0.72rem; color: var(--dim); padding: 6px 8px; margin-top: 6px;
+    background: rgba(139,148,158,0.06); border-radius: 5px;
+    font-family: "SF Mono", "Menlo", monospace; white-space: pre-wrap;
+    word-break: break-word; border-left: 2px solid var(--yellow);
   }
 
   /* Offline banner */
@@ -983,6 +992,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         onkeydown="acKeydown(event)">
       <div id="ac-list" class="ac-list"></div>
     </div>
+    <textarea id="create-prompt" rows="3" placeholder="Initial prompt (optional — sent on start)"
+      style="width:100%;font-size:0.85rem;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);resize:vertical;font-family:inherit;"></textarea>
     <div class="edit-actions">
       <button class="btn" onclick="closeCreate()">Cancel</button>
       <button class="btn primary" onclick="submitCreate()">Create</button>
@@ -1109,7 +1120,7 @@ let lastPeekHTML = '';
 // Connection & offline state
 let online = true;
 // Migrate localStorage keys from cc_ to cmux_
-['offline_queue','sessions_cache'].forEach(k => {
+['offline_queue','sessions_cache','drafts'].forEach(k => {
   const old = localStorage.getItem('cc_' + k);
   if (old && !localStorage.getItem('cmux_' + k)) {
     localStorage.setItem('cmux_' + k, old);
@@ -1117,6 +1128,29 @@ let online = true;
   }
 });
 let offlineQueue = JSON.parse(localStorage.getItem('cmux_offline_queue') || '[]');
+
+// ═══════ DRAFTS — offline-created sessions ═══════
+let drafts = JSON.parse(localStorage.getItem('cmux_drafts') || '[]');
+// Draft shape: { name, dir, prompt, created_at, syncing }
+
+function saveDrafts() {
+  localStorage.setItem('cmux_drafts', JSON.stringify(drafts));
+}
+
+function addDraft(name, dir, prompt) {
+  drafts.push({ name, dir: dir || '', prompt: prompt || '', created_at: Date.now(), syncing: false });
+  saveDrafts();
+}
+
+function removeDraft(name) {
+  drafts = drafts.filter(d => d.name !== name);
+  saveDrafts();
+}
+
+function getDraftPrompt(name) {
+  const d = drafts.find(d => d.name === name);
+  return d ? d.prompt : '';
+}
 let consecutiveFailures = 0;
 
 // Tailscale URL rewriting
@@ -1169,21 +1203,32 @@ function updateConnectionStatus() {
     el.textContent = '';
   } else {
     el.className = 'conn-status offline';
-    el.textContent = offlineQueue.length ? offlineQueue.length + ' queued' : 'offline';
+    const total = offlineQueue.length + drafts.length;
+    el.textContent = total ? total + ' pending' : 'offline';
   }
   // Update offline banner
   const banner = document.getElementById('offline-banner');
   const ops = document.getElementById('offline-ops');
   const title = document.getElementById('offline-banner-title');
   if (!banner) return;
-  if (online || !offlineQueue.length) {
+  const hasPending = offlineQueue.length || drafts.length;
+  if (online || !hasPending) {
     banner.classList.remove('active');
     return;
   }
   banner.classList.add('active');
-  const n = offlineQueue.length;
-  title.innerHTML = '&#x26A0; Offline &mdash; ' + n + ' operation' + (n === 1 ? '' : 's') + ' queued';
-  ops.innerHTML = offlineQueue.map(item => {
+  const parts = [];
+  if (drafts.length) parts.push(drafts.length + ' draft' + (drafts.length === 1 ? '' : 's'));
+  if (offlineQueue.length) parts.push(offlineQueue.length + ' op' + (offlineQueue.length === 1 ? '' : 's'));
+  title.innerHTML = '&#x26A0; Offline &mdash; ' + parts.join(', ') + ' pending';
+  let html = '';
+  html += drafts.map(d => {
+    return '<div class="offline-op">' +
+      '<span class="op-action">Create &amp; start ' + esc(d.name) + (d.prompt ? ' + prompt' : '') + '</span>' +
+      '<span class="op-time" style="color:var(--yellow)">draft</span>' +
+    '</div>';
+  }).join('');
+  html += offlineQueue.map(item => {
     const age = Math.floor((Date.now() - item.timestamp) / 60000);
     const timeStr = age < 1 ? 'just now' : age + 'm ago';
     return '<div class="offline-op">' +
@@ -1191,6 +1236,7 @@ function updateConnectionStatus() {
       '<span class="op-time">' + timeStr + '</span>' +
     '</div>';
   }).join('');
+  ops.innerHTML = html;
 }
 
 function setOnline(val) {
@@ -1199,8 +1245,8 @@ function setOnline(val) {
   if (val) consecutiveFailures = 0;
   updateConnectionStatus();
   if (!was && val) {
-    showToast('Reconnected');
-    replayQueue();
+    showToast('Reconnected — syncing...');
+    syncDrafts().then(() => replayQueue());
   } else if (was && !val) {
     showToast('Server unreachable — offline mode');
   }
@@ -1329,6 +1375,70 @@ async function replayQueue() {
   fetchSessions();
 }
 
+// ═══════ DRAFT SYNC ENGINE ═══════
+// On reconnect: create draft sessions → start → send prompts, one by one
+async function syncDrafts() {
+  if (!drafts.length) return;
+  const toSync = [...drafts];
+  showToast('Syncing ' + toSync.length + ' draft' + (toSync.length === 1 ? '' : 's') + '...');
+
+  for (const draft of toSync) {
+    draft.syncing = true;
+    saveDrafts();
+    render();
+
+    try {
+      // 1. Create session on server
+      const createResp = await fetch(API + '/api/sessions', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name: draft.name, dir: draft.dir })
+      });
+
+      if (!createResp.ok) {
+        const err = await createResp.json().catch(() => ({}));
+        // 409 = already exists, treat as success
+        if (createResp.status !== 409) {
+          showToast('Failed to create ' + draft.name + ': ' + (err.error || 'server error'));
+          draft.syncing = false;
+          saveDrafts();
+          continue;
+        }
+      }
+
+      // 2. Start the session
+      const startResp = await fetch(API + '/api/sessions/' + encodeURIComponent(draft.name) + '/start', {
+        method: 'POST'
+      });
+
+      // 3. If there's a prompt, wait for Claude to init then send it
+      if (draft.prompt && startResp.ok) {
+        showToast('Started ' + draft.name + ', sending prompt in 5s...');
+        await new Promise(r => setTimeout(r, 5000));
+        await fetch(API + '/api/sessions/' + encodeURIComponent(draft.name) + '/send', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ text: draft.prompt })
+        });
+        showToast('Sent prompt to ' + draft.name);
+      }
+
+      // Success — remove draft
+      removeDraft(draft.name);
+      render();
+    } catch(e) {
+      // Network error — stop syncing, will retry on next reconnect
+      draft.syncing = false;
+      saveDrafts();
+      showToast('Sync interrupted — will retry when connected');
+      return;
+    }
+  }
+
+  if (!drafts.length) {
+    showToast('All drafts synced');
+  }
+  fetchSessions();
+}
+
 // ═══════ API & CONNECTION ═══════
 let lastSessionsJSON = '';
 async function fetchSessions() {
@@ -1377,10 +1487,29 @@ function render() {
   } else {
     tagEl.innerHTML = '';
   }
-  if (!sessions.length) {
-    el.innerHTML = '<div class="empty">No sessions yet.<br>Tap <strong>+</strong> to create one.</div>';
+  if (!sessions.length && !drafts.length) {
+    el.innerHTML = '<div class="empty">No sessions yet.<br>Tap <strong>+</strong> to create one.' +
+      (!online ? '<br><span style="color:var(--yellow)">You\'re offline — sessions created now will sync when connected.</span>' : '') + '</div>';
     return;
   }
+
+  // Render draft cards at the top
+  const draftCards = drafts.map(d => {
+    const age = Math.floor((Date.now() - d.created_at) / 60000);
+    const timeStr = age < 1 ? 'just now' : age + 'm ago';
+    return `<div class="card" style="border-color:var(--yellow);opacity:${d.syncing?'0.6':'1'}">
+      <div class="card-header">
+        <div class="dot stopped" style="background:var(--yellow)"></div>
+        <div class="card-name">${esc(d.name)}</div>
+        <span class="draft-badge">${d.syncing ? 'syncing' : 'draft'}</span>
+        <span class="last-active">${timeStr}</span>
+        <button class="card-menu-btn" onclick="event.stopPropagation();removeDraft('${esc(d.name)}');render();" title="Remove draft">&#x2716;</button>
+      </div>
+      ${d.dir ? '<div class="card-dir">' + esc(d.dir) + '</div>' : ''}
+      ${d.prompt ? '<div class="draft-prompt">' + esc(d.prompt) + '</div>' : ''}
+    </div>`;
+  }).join('');
+
   // Filter by tag
   let list = activeTag ? sessions.filter(s => (s.tags || []).includes(activeTag)) : sessions;
   // Filter by search query
@@ -1472,6 +1601,9 @@ function render() {
       </div>
     </div>`;
   }).join('');
+
+  // Prepend drafts above server sessions
+  el.innerHTML = draftCards + el.innerHTML;
 
   // Restore input values and focus after re-rendering
   for (const [id, val] of Object.entries(savedInputs)) {
@@ -2250,6 +2382,7 @@ async function doConnect(tmuxName) {
 function openCreate() {
   document.getElementById('create-name').value = '';
   document.getElementById('create-dir').value = '';
+  document.getElementById('create-prompt').value = '';
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   document.getElementById('create-overlay').classList.add('active');
@@ -2262,12 +2395,34 @@ function closeCreate() {
 async function submitCreate() {
   const name = document.getElementById('create-name').value.trim();
   const dir = document.getElementById('create-dir').value.trim();
+  const prompt = document.getElementById('create-prompt').value.trim();
   if (!name) { document.getElementById('create-name').focus(); return; }
   closeCreate();
-  await apiCall(API + '/api/sessions', {
+
+  if (!online) {
+    // Offline: save as draft, will sync when connected
+    addDraft(name, dir, prompt);
+    showToast('Saved draft — will sync when online');
+    render();
+    return;
+  }
+
+  // Online: create immediately, optionally queue prompt
+  const r = await apiCall(API + '/api/sessions', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ name, dir })
   });
+  if (r && r.ok && prompt) {
+    // Start session then send prompt
+    await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/start', { method: 'POST' });
+    // Wait a moment for Claude to initialize
+    setTimeout(async () => {
+      await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text: prompt })
+      });
+    }, 5000);
+  }
   await fetchSessions();
 }
 
@@ -2415,41 +2570,46 @@ PWA_MANIFEST = json.dumps({
 
 # Minimal service worker: cache the app shell so it loads offline
 SERVICE_WORKER = r"""
-const CACHE = 'cmux-v1';
-const SHELL = ['/'];
+const CACHE = 'cmux-v2';
+const SHELL_URLS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
+// Install: pre-cache entire app shell
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
+  e.waitUntil(
+    caches.open(CACHE).then(c => c.addAll(SHELL_URLS))
+  );
   self.skipWaiting();
 });
 
+// Activate: clean old caches, take control immediately
 self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys().then(keys =>
       Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    )
+    ).then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  // Only cache GET requests for the app shell (HTML page)
   if (e.request.method !== 'GET') return;
-  // For the root page: network-first, fall back to cache
-  if (url.pathname === '/') {
-    e.respondWith(
-      fetch(e.request)
-        .then(r => {
-          const clone = r.clone();
-          caches.open(CACHE).then(c => c.put(e.request, clone));
-          return r;
-        })
-        .catch(() => caches.match(e.request))
-    );
-    return;
-  }
-  // For API calls and other requests: network only (offline queue handles mutations)
+
+  // API requests: network only (app JS handles offline queue)
+  if (url.pathname.startsWith('/api/')) return;
+
+  // App shell (/, manifest, icons): stale-while-revalidate
+  // Serve from cache immediately, fetch update in background
+  e.respondWith(
+    caches.open(CACHE).then(cache =>
+      cache.match(e.request).then(cached => {
+        const fetchPromise = fetch(e.request).then(response => {
+          if (response.ok) cache.put(e.request, response.clone());
+          return response;
+        }).catch(() => cached);  // network fail → use cached
+        return cached || fetchPromise;  // cache hit → instant, miss → wait for network
+      })
+    )
+  );
 });
 """.strip()
 
@@ -2919,17 +3079,70 @@ def _watch_self(server):
             pass
 
 
+# ── TLS ──
+
+TLS_DIR = CC_HOME / "tls"
+
+
+def _ensure_tls(lan_ip: str) -> tuple:
+    """Ensure TLS cert exists for localhost + LAN IP. Returns (cert, key) paths."""
+    cert_file = TLS_DIR / "cert.pem"
+    key_file = TLS_DIR / "key.pem"
+    if cert_file.exists() and key_file.exists():
+        return str(cert_file), str(key_file)
+
+    TLS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Prefer mkcert (locally-trusted, no browser warnings)
+    if subprocess.run(["which", "mkcert"], capture_output=True).returncode == 0:
+        print(f"\033[2m  Generating trusted TLS cert with mkcert...\033[0m")
+        subprocess.run(
+            ["mkcert", "-cert-file", str(cert_file), "-key-file", str(key_file),
+             "localhost", "127.0.0.1", lan_ip],
+            capture_output=True, check=True,
+        )
+        return str(cert_file), str(key_file)
+
+    # Fallback: self-signed via openssl
+    print(f"\033[2m  Generating self-signed TLS cert...\033[0m")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key_file), "-out", str(cert_file),
+         "-days", "365", "-subj", "/CN=cmux",
+         "-addext", f"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{lan_ip}"],
+        capture_output=True, check=True,
+    )
+    return str(cert_file), str(key_file)
+
+
 # ── Main ──
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8822
     lan_ip = get_lan_ip()
+    no_tls = "--no-tls" in sys.argv
 
     server = ThreadingHTTPServer(("0.0.0.0", port), CCHandler)
+
+    scheme = "http"
+    if not no_tls:
+        try:
+            cert, key = _ensure_tls(lan_ip)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert, key)
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+            scheme = "https"
+        except Exception as e:
+            print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
+
     print(f"\033[1m\033[34mcmux\033[0m web dashboard running")
-    print(f"  Local:   http://localhost:{port}")
-    print(f"  Network: http://{lan_ip}:{port}")
-    print(f"\n  Open on your phone → http://{lan_ip}:{port}")
+    print(f"  Local:   {scheme}://localhost:{port}")
+    print(f"  Network: {scheme}://{lan_ip}:{port}")
+    print(f"\n  Open on your phone → {scheme}://{lan_ip}:{port}")
+    if scheme == "https":
+        print(f"\033[32m  ✓ HTTPS enabled — service worker & offline mode will work\033[0m")
+    else:
+        print(f"\033[33m  ⚠ HTTP only — offline mode requires HTTPS on non-localhost\033[0m")
     print(f"\033[2m  Auto-reload active — editing cmux-server.py will restart\033[0m")
     print(f"\n\033[2mPress Ctrl-C to stop\033[0m")
 
