@@ -1781,12 +1781,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="settings-btn" id="settings-btn" onclick="event.stopPropagation();toggleSettings()">&#x2699;</button>
       <div class="settings-menu" id="settings-menu">
         <div class="settings-section">
-          <div class="settings-section-label">Device Name</div>
+          <div class="settings-section-label">Device</div>
+          <div id="settings-device-current" style="font-size:0.88rem;font-weight:600;margin-bottom:6px;"></div>
           <div class="settings-row">
-            <input id="settings-device-name" type="text" placeholder="e.g. iPhone, Work laptop" autocomplete="off"
+            <input id="settings-device-name" type="text" autocomplete="off"
               onchange="saveDeviceName(this.value)">
           </div>
-          <div style="font-size:0.65rem;color:var(--dim);">Auto-detected: <span id="settings-device-auto"></span></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
@@ -4775,10 +4775,13 @@ function toggleSettings() {
   const menu = document.getElementById('settings-menu');
   const open = menu.classList.toggle('open');
   if (open) {
-    // Populate device name
+    // Show effective device name and populate override input
+    const effective = _getDeviceName();
     const custom = localStorage.getItem('cmux_device_name') || '';
-    document.getElementById('settings-device-name').value = custom;
-    // Show auto-detected name
+    document.getElementById('settings-device-current').textContent = effective;
+    const inp = document.getElementById('settings-device-name');
+    inp.value = custom;
+    // Auto-detected name as placeholder so user knows what they'd override
     const ua = navigator.userAgent;
     let auto = 'Unknown';
     if (/iPhone/.test(ua)) auto = 'iPhone';
@@ -4787,7 +4790,7 @@ function toggleSettings() {
     else if (/Windows/.test(ua)) auto = 'Windows';
     else if (/Mac/.test(ua)) auto = 'Mac';
     else if (/Linux/.test(ua)) auto = 'Linux';
-    document.getElementById('settings-device-auto').textContent = auto;
+    inp.placeholder = custom ? 'Override (' + auto + ')' : auto + ' (auto-detected)';
     // Render servers
     renderSettingsServerList();
     // Close add form
@@ -4806,6 +4809,9 @@ function saveDeviceName(val) {
   } else {
     localStorage.removeItem('cmux_device_name');
   }
+  // Update displayed name immediately
+  const el = document.getElementById('settings-device-current');
+  if (el) el.textContent = _getDeviceName();
 }
 
 function renderSettingsServerList() {
