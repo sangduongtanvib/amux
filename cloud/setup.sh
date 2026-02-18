@@ -99,7 +99,7 @@ npm install -g @anthropic-ai/claude-code || true
 AMUX_DIR="/home/$AMUX_USER/amux"
 if [ ! -d "$AMUX_DIR" ]; then
   log "Cloning amux..."
-  sudo -u "$AMUX_USER" git clone https://github.com/ethanzrd/amux.git "$AMUX_DIR" 2>/dev/null || {
+  sudo -u "$AMUX_USER" git clone https://github.com/your-username/amux.git "$AMUX_DIR" 2>/dev/null || {
     # If repo isn't public yet, create the directory structure
     sudo -u "$AMUX_USER" mkdir -p "$AMUX_DIR"
     log "amux repo not available — directory created, copy files manually"

@@ -428,8 +428,8 @@ def get_daily_token_stats() -> dict:
             if amux_names:
                 label = ", ".join(sorted(amux_names))
             else:
-                # Show short path: ~/Dev/project instead of /Users/ethan/Dev/project
-                # proj_name is like "-Users-ethan-Dev" → "/Users/ethan/Dev"
+                # Show short path: ~/Dev/project instead of /Users/you/Dev/project
+                # proj_name is like "-Users-you-Dev" → "/Users/you/Dev"
                 full = "/" + proj_name.lstrip("-").replace("-", "/")
                 home = str(Path.home())
                 label = "~" + full[len(home):] if full.startswith(home) else full
