@@ -8,6 +8,7 @@
 import json
 import os
 import re
+import shlex
 import socket
 import ssl
 import subprocess
@@ -25,7 +26,10 @@ if not _cmux_home.exists() and _cc_home.exists():
     _cc_home.rename(_cmux_home)
 CC_HOME = Path(os.environ.get("CC_HOME", _cmux_home))
 CC_SESSIONS = CC_HOME / "sessions"
+CC_LOGS = CC_HOME / "logs"
+CC_LOGS.mkdir(parents=True, exist_ok=True)
 CLAUDE_HOME = Path.home() / ".claude"
+MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 
 # ═══════════════════════════════════════════
 # SESSION FILE HELPERS
@@ -100,6 +104,59 @@ def tmux_capture(session: str, lines: int = 500) -> str:
         return ""
 
 
+def _log_path(session: str) -> Path:
+    return CC_LOGS / f"{session}.log"
+
+
+def save_session_log(session: str, content: str):
+    """Append new content to session log, keeping file under MAX_LOG_BYTES."""
+    if not content.strip():
+        return
+    lp = _log_path(session)
+    try:
+        # Write full capture each time (tmux scrollback is the source of truth)
+        data = content.encode("utf-8", errors="replace")
+        if len(data) > MAX_LOG_BYTES:
+            data = data[-MAX_LOG_BYTES:]
+        lp.write_bytes(data)
+    except Exception:
+        pass
+
+
+def load_session_log(session: str) -> str:
+    """Load saved session log from disk."""
+    lp = _log_path(session)
+    if lp.exists():
+        try:
+            return lp.read_text(errors="replace")
+        except Exception:
+            pass
+    return ""
+
+
+def _snapshot_all_sessions():
+    """Capture scrollback for all running sessions and save to disk."""
+    for f in CC_SESSIONS.glob("*.env"):
+        name = f.stem
+        if is_running(name):
+            try:
+                output = tmux_capture(name, 5000)
+                if output:
+                    save_session_log(name, output)
+            except Exception:
+                pass
+
+
+def _snapshot_loop():
+    """Background thread: snapshot all sessions every 60 seconds."""
+    while True:
+        try:
+            _snapshot_all_sessions()
+        except Exception:
+            pass
+        time.sleep(60)
+
+
 def get_claude_stats(work_dir: str) -> dict:
     """Get token usage and last activity from Claude Code session files for a directory."""
     if not work_dir:
@@ -138,63 +195,339 @@ def get_claude_stats(work_dir: str) -> dict:
     return {"tokens": total_in + total_out, "last_active": last_ts}
 
 
+def detect_active_model(work_dir: str) -> str:
+    """Detect the model in use from the most recent Claude JSONL entries."""
+    if not work_dir:
+        return ""
+    resolved = str(Path(work_dir).expanduser().resolve())
+    project_name = resolved.replace("/", "-")
+    project_dir = CLAUDE_HOME / "projects" / project_name
+    if not project_dir.is_dir():
+        return ""
+    jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not jsonl_files:
+        return ""
+    try:
+        # Search from end in increasing chunks until we find a model
+        f = jsonl_files[0]
+        size = f.stat().st_size
+        for chunk_size in [200_000, 1_000_000, size]:
+            with f.open("rb") as fh:
+                offset = max(0, size - chunk_size)
+                if offset > 0:
+                    fh.seek(offset)
+                    fh.readline()  # skip partial line
+                data = fh.read().decode("utf-8", errors="replace")
+            for line in reversed(data.splitlines()):
+                try:
+                    entry = json.loads(line)
+                    model = entry.get("message", {}).get("model", "")
+                    if model:
+                        return model
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+            if chunk_size >= size:
+                break
+    except Exception:
+        pass
+    return ""
+
+
+_TOKEN_BASELINE_FILE = CC_HOME / "token_baseline.json"
+
+
+def _load_token_baseline() -> dict:
+    if _TOKEN_BASELINE_FILE.exists():
+        try:
+            data = json.loads(_TOKEN_BASELINE_FILE.read_text())
+            from datetime import datetime
+            if data.get("date") == datetime.now().strftime("%Y-%m-%d"):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def save_token_baseline(stats: dict):
+    from datetime import datetime
+    baseline = {"date": datetime.now().strftime("%Y-%m-%d"), "sessions": {}}
+    # Key by project dir (stable) not by display label (can change)
+    for s in stats.get("sessions", []):
+        key = s.get("proj_dir", s["name"])
+        baseline["sessions"][key] = {"input": s["input"], "output": s["output"]}
+    baseline["total_input"] = stats.get("total_input", 0)
+    baseline["total_output"] = stats.get("total_output", 0)
+    _TOKEN_BASELINE_FILE.write_text(json.dumps(baseline))
+
+
+# ═══════════════════════════════════════════
+# BOARD PERSISTENCE
+# ═══════════════════════════════════════════
+
+_BOARD_FILE = CC_HOME / "board.json"
+
+
+def _load_board() -> list:
+    if _BOARD_FILE.exists():
+        try:
+            return json.loads(_BOARD_FILE.read_text()).get("items", [])
+        except Exception:
+            pass
+    return []
+
+
+def _save_board(items: list):
+    counters = {}
+    if _BOARD_FILE.exists():
+        try:
+            counters = json.loads(_BOARD_FILE.read_text()).get("counters", {})
+        except Exception:
+            pass
+    _BOARD_FILE.write_text(json.dumps({"items": items, "counters": counters}))
+
+
+def get_daily_token_stats() -> dict:
+    """Get today's token usage across all Claude Code sessions and cmux sessions."""
+    from datetime import datetime, timezone
+    today = datetime.now().strftime("%Y-%m-%d")
+    projects_dir = CLAUDE_HOME / "projects"
+    if not projects_dir.is_dir():
+        return {"today": today, "total_tokens": 0, "total_input": 0, "total_output": 0, "sessions": []}
+
+    # Get cmux session dirs for labeling (multiple sessions can share a dir)
+    cmux_dirs = {}  # resolved_dir -> list of session names
+    for f in CC_SESSIONS.glob("*.env"):
+        cfg = parse_env_file(f)
+        d = cfg.get("CC_DIR", "")
+        if d:
+            resolved = str(Path(d).expanduser().resolve()).replace("/", "-")
+            cmux_dirs.setdefault(resolved, []).append(f.stem)
+
+    total_in = 0
+    total_out = 0
+    session_stats = []
+
+    for proj_dir in projects_dir.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        proj_in = 0
+        proj_out = 0
+        for jf in proj_dir.glob("*.jsonl"):
+            # Quick check: skip files not modified today
+            try:
+                mtime = datetime.fromtimestamp(jf.stat().st_mtime)
+                if mtime.strftime("%Y-%m-%d") != today:
+                    continue
+            except Exception:
+                continue
+            try:
+                with jf.open() as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            ts = entry.get("timestamp", "")
+                            if not ts or not ts.startswith(today):
+                                continue
+                            msg = entry.get("message", {})
+                            usage = msg.get("usage", {})
+                            if usage:
+                                proj_in += usage.get("input_tokens", 0)
+                                proj_in += usage.get("cache_creation_input_tokens", 0)
+                                proj_in += usage.get("cache_read_input_tokens", 0)
+                                proj_out += usage.get("output_tokens", 0)
+                        except (json.JSONDecodeError, AttributeError):
+                            continue
+            except Exception:
+                continue
+        if proj_in + proj_out > 0:
+            proj_name = proj_dir.name
+            cmux_names = cmux_dirs.get(proj_name, [])
+            if cmux_names:
+                label = ", ".join(sorted(cmux_names))
+            else:
+                # Show short path: ~/Dev/project instead of /Users/ethan/Dev/project
+                # proj_name is like "-Users-ethan-Dev" → "/Users/ethan/Dev"
+                full = "/" + proj_name.lstrip("-").replace("-", "/")
+                home = str(Path.home())
+                label = "~" + full[len(home):] if full.startswith(home) else full
+            session_stats.append({
+                "name": label,
+                "proj_dir": proj_name,
+                "cmux": bool(cmux_names),
+                "input": proj_in,
+                "output": proj_out,
+                "total": proj_in + proj_out,
+            })
+            total_in += proj_in
+            total_out += proj_out
+
+    # Subtract baseline if reset was used today
+    baseline = _load_token_baseline()
+    if baseline:
+        bl_sessions = baseline.get("sessions", {})
+        for s in session_stats:
+            # Try matching by proj_dir first (stable), then by label (legacy)
+            bl = bl_sessions.get(s["proj_dir"], bl_sessions.get(s["name"], {}))
+            s["input"] = max(0, s["input"] - bl.get("input", 0))
+            s["output"] = max(0, s["output"] - bl.get("output", 0))
+            s["total"] = s["input"] + s["output"]
+        total_in = max(0, total_in - baseline.get("total_input", 0))
+        total_out = max(0, total_out - baseline.get("total_output", 0))
+
+    session_stats = [s for s in session_stats if s["total"] > 0]
+    session_stats.sort(key=lambda s: s["total"], reverse=True)
+    cmux_tokens = sum(s["total"] for s in session_stats if s["cmux"])
+    return {
+        "today": today,
+        "total_tokens": total_in + total_out,
+        "total_input": total_in,
+        "total_output": total_out,
+        "cmux_tokens": cmux_tokens,
+        "sessions": session_stats,
+    }
+
+
 def _detect_claude_status(raw_output: str) -> str:
     """Detect Claude Code status from tmux output.
-    Returns: 'active', 'waiting', 'idle', or ''."""
+
+    Uses Claude Code's known terminal UI patterns to determine state.
+    Scans bottom-up for the most recent definitive signal.
+
+    Returns: 'active', 'waiting', 'idle', or ''.
+    """
     if not raw_output:
         return ""
-    clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07', '', raw_output)
+    clean = re.sub(
+        r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+        r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
+        '', raw_output,
+    )
     lines = [l for l in clean.splitlines() if l.strip()]
     if not lines:
         return ""
-    tail = "\n".join(lines[-5:])
-    tail_lower = tail.lower()
-    # Find the status bar line (starts with ⏵⏵ or contains "bypass permissions" / "plan mode")
+
+    # ── 1. Status bar (bottom 3 lines — always the very last line when visible) ──
     status_bar = ""
-    for l in reversed(lines[-5:]):
-        ls = l.strip().lower()
-        if "⏵⏵" in l or "bypass permissions" in ls or "plan mode" in ls:
-            status_bar = ls
+    for l in reversed(lines[-3:]):
+        ls = l.strip()
+        # Status bar indicators: ⏵⏵, bypass permissions, plan mode, auto-compact
+        if "\u23f5\u23f5" in ls or "bypass permissions" in ls.lower() or "plan mode" in ls.lower():
+            status_bar = ls.lower()
             break
-    # Active: "esc to interru" handles tmux truncation of "esc to interrupt"
-    if "esc to interru" in status_bar:
+
+    # "esc to interrupt" (may be truncated to "esc to" or "esc t…") → active
+    if status_bar and re.search(r"esc t", status_bar):
         return "active"
-    # Waiting: tool approval pending (N bash, N tool, approve)
-    if re.search(r'\d+\s+(bash|tool)', status_bar) or "approve" in status_bar:
-        return "waiting"
-    # Idle: at the prompt with status bar visible
+
+    # ── 2. Scan last 12 lines bottom-up for the most recent signal ──
+    for l in reversed(lines[-12:]):
+        s = l.strip()
+        sl = s.lower()
+
+        # ── Active signals ──
+        # Spinner: dingbat char (U+2700-27BF) + verb + … (ellipsis = still running)
+        #   e.g. "✻ Beaming… (1m 3s)" "✽ Tinkering…" "✳ Germinating…" "✢ Synthesizing…"
+        if s and "\u2700" <= s[0] <= "\u27bf" and "\u2026" in s:
+            return "active"
+        # Tool execution in progress
+        if s.startswith("Running\u2026") or re.match(r"Reading \d+ file", s):
+            return "active"
+
+        # ── Completed signals (= idle, Claude finished and returned to prompt) ──
+        # Completed spinner: dingbat + past tense + "for" + duration (no ellipsis)
+        #   e.g. "✻ Brewed for 1m 8s"  "✻ Sautéed for 4m 19s"
+        if s and "\u2700" <= s[0] <= "\u27bf" and " for " in s and "\u2026" not in s:
+            return "idle"
+
+        # ── Waiting signals (needs user action) ──
+        # Multi-choice / AskUserQuestion prompt
+        if "enter to select" in sl:
+            return "waiting"
+        # "Interrupted" with follow-up question
+        if "interrupted" in sl and "what should claude do" in sl:
+            return "waiting"
+
+    # ── 3. Status bar secondary checks ──
     if status_bar:
+        # Tool approval pending (only when bypass is off)
+        bypass_on = "bypass permissions on" in status_bar
+        if not bypass_on and re.search(r"\d+\s+(bash|tool|read|edit|write|glob|grep|notebook)", status_bar):
+            return "waiting"
+        if "approve" in status_bar:
+            return "waiting"
+        # Status bar visible but no active/waiting signal → idle at prompt
         return "idle"
-    # No status bar — check for prompt character
-    if "\u276f" in tail or "\u2770" in tail or "$ " in tail:
+
+    # ── 4. Fallback: check for prompt character ──
+    tail = "\n".join(lines[-5:])
+    if "\u276f" in tail or "$ " in tail:
         return "idle"
     return ""
 
 
-def _tmux_activity_map() -> dict:
-    """Get last activity epoch for all tmux sessions in one call."""
+def _tmux_info_map() -> dict:
+    """Get activity, creation time, and pane title for all tmux sessions."""
+    result = {}
     try:
         r = subprocess.run(
-            ["tmux", "list-sessions", "-F", "#{session_name}\t#{session_activity}"],
+            ["tmux", "list-panes", "-a", "-F",
+             "#{session_name}\t#{session_activity}\t#{session_created}\t#{pane_title}"],
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode != 0:
             return {}
-        result = {}
         for line in r.stdout.strip().splitlines():
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                result[parts[0]] = int(parts[1])
+            parts = line.split("\t", 3)
+            if len(parts) >= 3:
+                name = parts[0]
+                # Only keep first pane per session
+                if name not in result:
+                    title = parts[3].strip() if len(parts) >= 4 else ""
+                    # Strip leading braille/dingbat status chars from pane title
+                    clean_title = re.sub(r'^[\u2800-\u28ff\u2700-\u27bf\s]+', '', title).strip()
+                    result[name] = {
+                        "activity": int(parts[1]),
+                        "created": int(parts[2]),
+                        "pane_title": clean_title,
+                    }
         return result
     except Exception:
         return {}
+
+
+def _parse_task_time(raw_output: str) -> str:
+    """Extract the current task duration from Claude Code's spinner line.
+    e.g. '✻ Beaming… (1m 24s · ↓ 1.1k tokens)' → '1m 24s'
+    e.g. '✻ Brewed for 4m 19s' → '4m 19s' (last completed task)
+    """
+    if not raw_output:
+        return ""
+    clean = re.sub(
+        r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+        r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
+        '', raw_output,
+    )
+    lines = [l for l in clean.splitlines() if l.strip()]
+    for l in reversed(lines[-12:]):
+        s = l.strip()
+        if not s or s[0] < "\u2700" or s[0] > "\u27bf":
+            continue
+        # Active spinner: ✻ Verb… (Xm Ys · ...) — time is in parens
+        m = re.search(r'\((\d[\dm\s]*s)\b', s)
+        if m:
+            return m.group(1)
+        # Completed spinner: ✻ Verbed for Xm Ys
+        m = re.search(r' for (\d[\dm\s]*s)\b', s)
+        if m:
+            return m.group(1)
+    return ""
 
 
 def list_sessions() -> list:
     sessions = []
     if not CC_SESSIONS.is_dir():
         return sessions
-    activity = _tmux_activity_map()
+    tmux_info = _tmux_info_map()
     for f in sorted(CC_SESSIONS.glob("*.env")):
         name = f.stem
         cfg = parse_env_file(f)
@@ -202,19 +535,50 @@ def list_sessions() -> list:
         preview = ""
         preview_lines = []
         status = ""
-        last_activity = activity.get(tmux_name(name), 0)
+        tinfo = tmux_info.get(tmux_name(name), {})
+        last_activity = tinfo.get("activity", 0)
+        session_created = tinfo.get("created", 0)
+        pane_title = tinfo.get("pane_title", "")
+        raw = ""
         if running:
-            raw = tmux_capture(name, 8)
+            raw = tmux_capture(name, 30)
+        elif _log_path(name).exists():
+            # Load saved log for stopped sessions (last 30 lines worth)
+            saved = load_session_log(name)
+            if saved:
+                raw = "\n".join(saved.splitlines()[-30:])
+        if raw:
+            strip_ansi = lambda t: re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]', '', t)
             lines = [l for l in raw.splitlines() if l.strip()]
-            strip_ansi = lambda t: re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07', '', t)
             preview = strip_ansi(lines[-1][:120]) if lines else ""
-            # Last 3 non-empty content lines (skip status bar line)
-            content = [strip_ansi(l)[:200] for l in lines[:-1] if l.strip()] if len(lines) > 1 else []
-            preview_lines = content[-3:] if content else []
-            status = _detect_claude_status(raw)
+            if running:
+                status = _detect_claude_status(raw)
+            # Filter for intelligible content lines
+            intelligible = []
+            for l in lines:
+                cl = strip_ansi(l).strip()
+                if not cl:
+                    continue
+                if "⏵⏵" in cl or "bypass permissions" in cl.lower() or "plan mode" in cl.lower():
+                    continue
+                alnum = sum(1 for c in cl if c.isalnum() or c == ' ')
+                if len(cl) > 3 and alnum / len(cl) < 0.3:
+                    continue
+                if len(cl) <= 2:
+                    continue
+                if len(set(cl.replace(' ', ''))) <= 2:
+                    continue
+                intelligible.append(cl[:200])
+            preview_lines = intelligible[-5:] if intelligible else []
+        # Detect active model from JSONL (fast — reads last 50KB)
+        raw_dir = cfg.get("CC_DIR", "")
+        resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
+        active_model = detect_active_model(raw_dir)
+        # Parse task time from spinner line
+        task_time = _parse_task_time(raw) if raw else ""
         sessions.append({
             "name": name,
-            "dir": cfg.get("CC_DIR", ""),
+            "dir": resolved_dir,
             "desc": cfg.get("CC_DESC", ""),
             "pinned": cfg.get("CC_PINNED", "") == "1",
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
@@ -224,6 +588,10 @@ def list_sessions() -> list:
             "preview": preview,
             "preview_lines": preview_lines,
             "last_activity": last_activity,
+            "active_model": active_model,
+            "session_created": session_created,
+            "task_time": task_time,
+            "task_name": pane_title,
         })
     # Pinned first, then working/waiting, then by last activity (most recent first)
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
@@ -236,9 +604,10 @@ def get_session_info(name: str) -> dict | None:
     if not f.exists():
         return None
     cfg = parse_env_file(f)
+    raw_dir = cfg.get("CC_DIR", "")
     return {
         "name": name,
-        "dir": cfg.get("CC_DIR", ""),
+        "dir": str(Path(raw_dir).expanduser().resolve()) if raw_dir else "",
         "desc": cfg.get("CC_DESC", ""),
         "pinned": cfg.get("CC_PINNED", "") == "1",
         "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
@@ -269,7 +638,7 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
     if is_running(name):
         return True, "already running"
     cfg = parse_env_file(f)
-    work_dir = cfg.get("CC_DIR", str(Path.home()))
+    work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
     flags = cfg.get("CC_FLAGS", "")
 
     # Load defaults
@@ -293,11 +662,14 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
         # cannot override the window title via terminal escape sequences.
         # Clear CLAUDECODE so nested-session detection doesn't block Claude
         # Source user profile to ensure PATH includes ~/.local/bin (where claude lives)
+        # Then cd back to work_dir since the profile may override CWD (e.g. cd ~/Dev)
         shell_rc = ""
         for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
             if rc.exists():
-                shell_rc = f"source {rc} 2>/dev/null; "
+                shell_rc = f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
                 break
+        if not shell_rc:
+            shell_rc = f"cd {shlex.quote(work_dir)}; "
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
              "-e", "TMUX_SESSION_NAME=" + name, shell_rc + cmd],
@@ -554,7 +926,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .send-input {
     flex: 1; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    outline: none; min-height: 44px; max-height: calc(1.4em * 3 + 28px);
+    outline: none; min-height: 44px; max-height: calc(1.4em * 10 + 28px);
     resize: none; overflow-y: auto; line-height: 1.4;
     font-family: inherit; field-sizing: content;
   }
@@ -562,11 +934,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Peek overlay */
   .overlay {
-    display: none; position: fixed; inset: 0; background: var(--bg);
+    position: fixed; top: 0; left: 0; right: 0;
+    height: 100%; height: 100dvh;
+    background: var(--bg);
     z-index: 100; flex-direction: column;
     padding: 12px; padding-top: max(12px, env(safe-area-inset-top));
+    overflow: hidden;
+    display: flex; pointer-events: none; opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 0.25s, transform 0.25s cubic-bezier(.4,0,.2,1);
   }
-  .overlay.active { display: flex; }
+  .overlay.active { pointer-events: auto; opacity: 1; transform: none; }
   .overlay-header {
     display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 8px; flex-shrink: 0;
@@ -582,6 +960,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-user-select: text; user-select: text;
     -webkit-touch-callout: default; cursor: text;
   }
+  .peek-copy-btn {
+    position: absolute; top: 6px; right: 6px; z-index: 10;
+    height: 28px; border-radius: 6px; padding: 0 8px;
+    border: 1px solid rgba(255,255,255,0.15); background: rgba(13,17,23,0.85);
+    color: var(--dim); font-size: 0.75rem; cursor: pointer;
+    display: flex; align-items: center; gap: 4px;
+    -webkit-tap-highlight-color: transparent; transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .peek-copy-btn:active { background: var(--accent); color: #fff; }
   .overlay-body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
   .overlay-body a:active { color: #79c0ff; }
   .overlay-body .file-link { color: var(--cyan); text-decoration: none; border-bottom: 1px dashed var(--cyan); cursor: pointer; }
@@ -643,7 +1031,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     position: sticky; top: 0; z-index: 40;
     background: var(--bg); padding: 16px;
     padding-top: max(16px, env(safe-area-inset-top));
-    margin: -16px -16px 16px -16px;
+    margin: -16px -16px 0 -16px;
   }
   .header-row h1 { margin-bottom: 0; }
   .btn-create {
@@ -720,14 +1108,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .search-wrap {
     position: relative; display: flex; align-items: center;
   }
+  .search-wrap { flex: 1; }
   .search-input {
     font-size: 0.85rem; padding: 8px 28px 8px 12px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--card); color: var(--text);
-    outline: none; min-height: 40px; width: 140px;
+    outline: none; min-height: 40px; width: 100%; box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;
   }
   .search-input::placeholder { color: var(--dim); }
-  .search-input:focus { border-color: var(--accent); width: 180px; }
+  .search-input:focus { border-color: var(--accent); }
   .search-clear {
     position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
     width: 20px; height: 20px; border-radius: 50%; border: none;
@@ -743,8 +1132,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     pointer-events: none; white-space: nowrap;
   }
   @media (max-width: 480px) {
-    .search-input { width: 70px; flex-shrink: 1; min-width: 0; }
-    .search-input:focus { width: 110px; }
+    .search-input { min-width: 0; }
+    .search-input:focus { }
     .header-row { gap: 4px; flex-wrap: nowrap; }
     .header-row h1 { font-size: 1.1rem; flex-shrink: 0; }
     .header-row > div { gap: 6px !important; flex-shrink: 1; min-width: 0; }
@@ -792,6 +1181,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--dim); font-size: 0.75rem;
   }
   .card-stats span { display: flex; align-items: center; gap: 4px; }
+  .card-timing {
+    display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+    margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+    background: rgba(255,255,255,0.02); font-size: 0.75rem; color: var(--dim);
+  }
+  .card-timing .timing-item { display: flex; align-items: center; gap: 4px; }
+  .card-timing .timing-label { opacity: 0.7; }
+  .card-timing .timing-value { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .card-timing .timing-value.accent { color: var(--accent); }
+  .card-task-name {
+    font-size: 0.8rem; font-weight: 600; color: var(--text);
+    margin-top: 8px; padding: 0 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .card-task-name .tn-label { font-weight: 400; color: var(--dim); margin-right: 4px; }
 
   /* Pin indicator */
   .pin-icon { font-size: 0.75rem; opacity: 0.7; }
@@ -847,6 +1251,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .empty code { color: var(--accent); }
 
+  /* Sync activity banner */
+  .sync-banner {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 450;
+    background: var(--card); border-top: 1px solid var(--accent);
+    padding: 10px 16px; font-size: 0.8rem;
+    transform: translateY(100%); transition: transform 0.2s;
+    max-height: 40vh; overflow-y: auto;
+  }
+  .sync-banner.active { transform: translateY(0); }
+  .sync-banner .sync-title { font-weight: 600; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+  .sync-banner .sync-item { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 0.75rem; }
+  .sync-banner .sync-item.pending { color: var(--dim); }
+  .sync-banner .sync-item.running { color: var(--accent); }
+  .sync-banner .sync-item.done { color: #4ade80; }
+  .sync-banner .sync-item.failed { color: #f87171; }
+
+  /* Sending indicator */
+  .sending-indicator {
+    position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+    background: var(--accent); color: #fff; font-size: 0.7rem; font-weight: 600;
+    padding: 3px 12px; border-radius: 12px; z-index: 10;
+    animation: send-pulse 1s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes send-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
   /* Toast notifications */
   .toast {
     position: fixed; bottom: 20px; right: 20px; z-index: 500;
@@ -859,20 +1289,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .toast.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
-  /* Connection status indicator — dot + short label */
+  /* Connection status indicator — pill button */
   .conn-status {
-    display: flex; align-items: center; gap: 5px;
-    font-size: 0.7rem; font-weight: 500; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.75rem; font-weight: 600; white-space: nowrap;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
-    flex-shrink: 0; transition: color 0.2s;
+    flex-shrink: 0; transition: all 0.2s;
+    padding: 4px 10px; border-radius: 12px; border: none;
+    line-height: 1;
   }
   .conn-status::before {
     content: ''; width: 8px; height: 8px; border-radius: 50%;
     flex-shrink: 0; transition: background 0.2s;
   }
-  .conn-status.online { color: var(--dim); }
+  .conn-status.online {
+    color: #4ade80; background: rgba(74,222,128,0.1);
+  }
   .conn-status.online::before { background: #4ade80; }
-  .conn-status.offline { color: #f87171; }
+  .conn-status.offline {
+    color: #f87171; background: rgba(248,113,113,0.15);
+  }
   .conn-status.offline::before { background: #f87171; }
 
   /* Queue modal */
@@ -938,22 +1374,250 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .offline-op .op-action { color: var(--text); font-weight: 500; }
   .offline-op .op-time { color: var(--yellow); font-size: 0.65rem; }
   .offline-op .op-stale { color: var(--red); font-size: 0.65rem; font-style: italic; }
+
+  /* Tab bar */
+  .tab-bar {
+    display: flex; gap: 0; margin: 0 -16px 12px -16px; padding: 0 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab-bar button {
+    flex: 1; padding: 10px 0; font-size: 0.85rem; font-weight: 600;
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-bar button:active { opacity: 0.7; }
+
+  /* Board */
+  .board-columns {
+    display: flex; gap: 12px; overflow-x: auto;
+    -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
+    min-height: 200px;
+  }
+  .board-columns::-webkit-scrollbar { display: none; }
+  .board-col {
+    flex: 1; min-width: 200px; max-width: 320px;
+    display: flex; flex-direction: column; gap: 6px;
+    background: rgba(255,255,255,0.02); border-radius: 10px; padding: 10px 8px;
+    min-height: 80px;
+  }
+  .board-col-header {
+    font-size: 0.72rem; font-weight: 600; color: var(--dim);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 2px 4px 8px 4px; border-bottom: 1px solid var(--border); margin-bottom: 2px;
+  }
+  .board-col-header .col-count {
+    font-weight: 500; font-size: 0.68rem; color: var(--dim);
+    background: var(--border); border-radius: 8px; padding: 1px 6px;
+  }
+  .board-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px;
+    cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s, transform 0.35s cubic-bezier(.4,0,.2,1), opacity 0.3s;
+    -webkit-tap-highlight-color: transparent;
+    will-change: transform, opacity;
+  }
+  .board-card:active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(88,166,255,0.2); }
+  .board-card.card-enter { animation: cardEnter 0.3s cubic-bezier(.4,0,.2,1) both; }
+  .board-card.card-flip { transition: transform 0.35s cubic-bezier(.4,0,.2,1); }
+  @keyframes cardEnter {
+    from { opacity: 0; transform: scale(0.95) translateY(-6px); }
+    to { opacity: 1; transform: none; }
+  }
+  .col-count { transition: transform 0.15s; }
+  .col-count.bump { animation: countBump 0.25s; }
+  @keyframes countBump { 50% { transform: scale(1.3); } }
+  .board-card-title {
+    font-size: 0.87rem; font-weight: 500; line-height: 1.35;
+    word-break: break-word; margin-bottom: 4px;
+  }
+  .board-card-desc {
+    font-size: 0.74rem; color: var(--dim); margin-bottom: 6px;
+    word-break: break-word; line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .board-card-footer {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-top: 6px;
+  }
+  .board-card-key { font-size: 0.62rem; color: var(--dim); font-family: "SF Mono","Fira Code",monospace; letter-spacing: 0.02em; white-space: nowrap; }
+  .board-card-session {
+    font-size: 0.62rem; background: rgba(88,166,255,0.08); color: var(--accent);
+    border: 1px solid rgba(88,166,255,0.18); border-radius: 4px; padding: 1px 5px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90px;
+  }
+  .board-card-tag {
+    font-size: 0.62rem; background: rgba(139,148,158,0.1); color: var(--dim);
+    border: 1px solid rgba(139,148,158,0.15); border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+  }
+  .board-card-time { font-size: 0.62rem; color: var(--dim); margin-left: auto; white-space: nowrap; }
+  .board-add-btn {
+    width: 100%; padding: 7px 0; font-size: 0.8rem; font-weight: 500;
+    border: 1px dashed rgba(255,255,255,0.08); border-radius: 8px;
+    background: none; color: var(--dim); cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+    -webkit-tap-highlight-color: transparent; margin-top: 2px;
+  }
+  .board-add-btn:active { border-color: var(--accent); color: var(--accent); }
+  .board-empty { text-align: center; color: rgba(139,148,158,0.5); font-size: 0.78rem; padding: 20px 0; }
+  .board-card.dragging { opacity: 0.35; }
+  .board-col.drag-over { background: rgba(88,166,255,0.06); outline: 1px dashed rgba(88,166,255,0.3); }
+  .board-filters { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 0 8px; align-items: center; }
+  .board-filter-label { font-size: 0.68rem; color: var(--dim); white-space: nowrap; }
+  .board-filter-chip {
+    font-size: 0.72rem; padding: 3px 10px; border-radius: 12px;
+    border: 1px solid var(--border); background: none; color: var(--dim);
+    cursor: pointer; -webkit-tap-highlight-color: transparent; transition: all 0.12s; white-space: nowrap;
+  }
+  .board-filter-chip.active { background: rgba(88,166,255,0.15); color: var(--accent); border-color: rgba(88,166,255,0.3); }
+  .board-filter-chip.active-session { background: rgba(139,148,158,0.15); color: var(--text); border-color: var(--dim); }
+  /* Board card detail */
+  .board-detail-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0 12px; -webkit-overflow-scrolling: touch; }
+  .board-detail-key { font-size: 0.72rem; color: var(--dim); font-family: "SF Mono","Fira Code",monospace; margin-bottom: 8px; }
+  .board-detail-title-input {
+    width: 100%; font-size: 1.25rem; font-weight: 700; background: none; border: none;
+    color: var(--text); outline: none; padding: 0; margin-bottom: 10px;
+    font-family: inherit; line-height: 1.35; box-sizing: border-box;
+    resize: none; overflow: hidden; word-wrap: break-word;
+  }
+  .board-detail-title-input::placeholder { color: var(--dim); }
+  .board-detail-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .board-detail-status-row { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .board-detail-status-btn {
+    padding: 4px 13px; border-radius: 20px; font-size: 0.75rem; font-weight: 600;
+    border: 1px solid var(--border); background: none; color: var(--dim);
+    cursor: pointer; transition: all 0.15s; -webkit-tap-highlight-color: transparent;
+  }
+  .board-detail-status-btn.active-todo { background: rgba(139,148,158,0.15); color: var(--text); border-color: var(--dim); }
+  .board-detail-status-btn.active-doing { background: rgba(210,153,34,0.15); color: var(--yellow); border-color: var(--yellow); }
+  .board-detail-status-btn.active-done { background: rgba(63,185,80,0.15); color: var(--green); border-color: var(--green); }
+  .board-detail-session-select {
+    padding: 4px 8px; border-radius: 6px; font-size: 0.8rem;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+    outline: none; font-family: inherit; max-width: 200px;
+  }
+  .board-detail-tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 2px; }
+  .board-detail-tab {
+    padding: 6px 14px; font-size: 0.8rem; font-weight: 500; cursor: pointer;
+    border: none; background: none; color: var(--dim); border-bottom: 2px solid transparent;
+    margin-bottom: -1px; -webkit-tap-highlight-color: transparent;
+  }
+  .board-detail-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .board-detail-desc-input {
+    width: 100%; min-height: 200px; font-size: 0.92rem; background: none;
+    border: none; color: var(--text); outline: none; padding: 10px 0;
+    font-family: inherit; line-height: 1.65; resize: none; box-sizing: border-box;
+  }
+  .board-detail-desc-input::placeholder { color: var(--dim); }
+  .board-detail-preview { min-height: 200px; font-size: 0.92rem; line-height: 1.65; color: var(--text); padding: 10px 0; }
+  .board-detail-preview h1{font-size:1.2rem;font-weight:700;margin:10px 0 5px}
+  .board-detail-preview h2{font-size:1.05rem;font-weight:700;margin:9px 0 4px}
+  .board-detail-preview h3{font-size:0.95rem;font-weight:700;margin:8px 0 4px}
+  .board-detail-preview p{margin:0 0 9px}
+  .board-detail-preview ul,.board-detail-preview ol{margin:0 0 9px;padding-left:20px}
+  .board-detail-preview li{margin-bottom:3px}
+  .board-detail-preview code{font-family:"SF Mono","Fira Code",monospace;font-size:0.85em;background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px}
+  .board-detail-preview pre{background:rgba(0,0,0,0.3);border-radius:6px;padding:12px;overflow-x:auto;margin:0 0 9px}
+  .board-detail-preview pre code{background:none;padding:0;font-size:0.82em}
+  .board-detail-preview a{color:var(--accent);text-decoration:underline}
+  .board-detail-preview hr{border:none;border-top:1px solid var(--border);margin:10px 0}
+  .board-detail-preview blockquote{border-left:3px solid var(--border);margin:0 0 9px;padding:2px 12px;color:var(--dim)}
+  .board-detail-meta { margin-top: 12px; font-size: 0.78rem; color: var(--dim); border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 5px; }
+  .board-detail-meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .board-detail-footer { display: flex; justify-content: space-between; align-items: center; padding-top: 10px; flex-shrink: 0; border-top: 1px solid var(--border); }
+
+  /* Board guide modal */
+  .board-guide-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    width: 100%; max-width: 520px; max-height: 82vh; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .board-edit-overlay .board-guide-box {
+    opacity: 0; transform: scale(0.95) translateY(8px);
+    transition: opacity 0.25s, transform 0.25s cubic-bezier(.4,0,.2,1);
+  }
+  .board-edit-overlay.active .board-guide-box { opacity: 1; transform: none; }
+  .board-guide-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 16px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .board-guide-header strong { font-size: 0.9rem; }
+  .board-guide-body {
+    padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  }
+  .board-guide-body section h4 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 6px; }
+  .board-guide-body section p { font-size: 0.82rem; color: var(--text); margin: 0 0 5px; line-height: 1.5; }
+  .board-guide-body section ul { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+  .board-guide-body section ul li { font-size: 0.82rem; color: var(--text); line-height: 1.45; }
+  .guide-example { font-size: 0.8rem; margin-bottom: 3px; }
+  .guide-example.good { color: #3fb950; }
+  .guide-example.bad { color: var(--dim); }
+  .guide-pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; font-size: 0.78rem; font-family: "SF Mono","Fira Code",monospace;
+    line-height: 1.55; margin: 0; white-space: pre; overflow-x: auto; color: var(--text);
+  }
+  .guide-table { border-collapse: collapse; width: 100%; font-size: 0.8rem; }
+  .guide-table td { padding: 3px 8px 3px 0; vertical-align: top; color: var(--text); }
+  .guide-table td:nth-child(odd) code { color: var(--accent); }
+
+  /* Board inline edit */
+  .board-edit-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0); align-items: center; justify-content: center;
+    padding: 16px; display: flex; pointer-events: none;
+    transition: background 0.25s;
+  }
+  .board-edit-overlay.active { background: rgba(0,0,0,0.6); pointer-events: auto; }
+  .board-edit-overlay .board-edit-box {
+    opacity: 0; transform: scale(0.95) translateY(8px);
+    transition: opacity 0.25s, transform 0.25s cubic-bezier(.4,0,.2,1);
+  }
+  .board-edit-overlay.active .board-edit-box { opacity: 1; transform: none; }
+  .board-edit-box {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; width: 100%; max-width: 400px;
+  }
+  .board-edit-box input, .board-edit-box textarea {
+    width: 100%; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    font-size: 0.85rem; font-family: inherit; margin-bottom: 8px;
+  }
+  .board-edit-box textarea { resize: vertical; min-height: 60px; }
+  .board-edit-box select {
+    width: 100%; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    font-size: 0.85rem; margin-bottom: 8px;
+  }
+  .board-edit-actions {
+    display: flex; gap: 8px; margin-top: 4px;
+  }
+  .board-edit-actions button {
+    flex: 1; padding: 8px 0; border-radius: 8px; font-size: 0.82rem;
+    font-weight: 600; cursor: pointer; border: 1px solid var(--border);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .board-edit-actions .be-cancel { background: var(--card); color: var(--dim); }
+  .board-edit-actions .be-save { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .board-edit-actions .be-cancel:active { background: var(--border); }
+  .board-edit-actions .be-save:active { opacity: 0.8; }
 </style>
 </head>
 <body>
 
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
-    <h1 style="margin:0;">cmux</h1>
+    <h1 style="margin:0;cursor:pointer;" onclick="openAbout()">cmux</h1>
     <span id="conn-status" class="conn-status online" onclick="showQueueModal()"></span>
   </div>
-  <div style="display:flex;gap:8px;align-items:center;">
+  <div style="display:flex;gap:8px;align-items:center;flex:1;min-width:0;">
     <div class="search-wrap" id="search-wrap">
       <input class="search-input" id="search-input" type="text" placeholder="Search..." autocomplete="off" autocorrect="off"
         oninput="searchQuery=this.value;document.getElementById('search-wrap').classList.toggle('has-value',!!this.value);render()">
       <button class="search-clear" onclick="event.stopPropagation();clearSearch()">&#x2715;</button>
     </div>
-    <button class="btn" onclick="fetchSessions()" title="Refresh" style="padding:8px 10px;font-size:1rem;">&#x21BB;</button>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -970,6 +1634,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
+<div class="tab-bar">
+  <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
+  <button id="tab-board" onclick="switchView('board')">Board</button>
+</div>
+<div id="session-view">
 <div id="tag-filters" class="tag-filters"></div>
 <div id="offline-banner" class="offline-banner">
   <div class="offline-banner-header">
@@ -979,13 +1648,120 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="offline-ops" class="offline-queue-ops"></div>
 </div>
 <div id="cards" class="cards"></div>
+</div>
+<div id="board-view" style="display:none;">
+  <div style="display:flex;align-items:flex-start;gap:8px;">
+    <div class="board-filters" id="board-filters" style="flex:1;"></div>
+    <button class="btn" style="white-space:nowrap;font-size:0.72rem;padding:3px 9px;margin-top:6px;flex-shrink:0;" onclick="openBoardGuide()">? Guide</button>
+  </div>
+  <div class="board-columns" id="board-columns"></div>
+</div>
+<!-- Board issue guide modal -->
+<div id="board-guide-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeBoardGuide()">
+  <div class="board-guide-box">
+    <div class="board-guide-header">
+      <strong>Issue Guide</strong>
+      <button onclick="closeBoardGuide()" style="background:none;border:none;color:var(--dim);font-size:1.1rem;cursor:pointer;padding:0;line-height:1;">&#x2715;</button>
+    </div>
+    <div class="board-guide-body">
+      <section>
+        <h4>Title</h4>
+        <p>Imperative, one line. State what changed or what needs to happen.</p>
+        <div class="guide-example good">&#x2713; <code>Add rate limiting to API endpoints</code></div>
+        <div class="guide-example bad">&#x2717; <code>rate limit</code> &nbsp; &#x2717; <code>fixed stuff</code></div>
+      </section>
+      <section>
+        <h4>Status</h4>
+        <p><strong>To Do</strong> — planned &nbsp;·&nbsp; <strong>In Progress</strong> — active &nbsp;·&nbsp; <strong>Done</strong> — complete</p>
+      </section>
+      <section>
+        <h4>Description template</h4>
+        <pre class="guide-pre">## What
+One paragraph: what changed or needs to change.
+
+## Why
+Context, motivation, or link to the original request.
+
+## Acceptance criteria
+- [ ] Specific, verifiable outcome
+- [ ] Edge cases handled</pre>
+      </section>
+      <section>
+        <h4>Markdown quick ref</h4>
+        <table class="guide-table">
+          <tr><td><code>**bold**</code></td><td><strong>bold</strong></td><td><code>*italic*</code></td><td><em>italic</em></td></tr>
+          <tr><td><code>`code`</code></td><td><code>code</code></td><td><code>## Heading</code></td><td><strong style="font-size:0.95em">Heading</strong></td></tr>
+          <tr><td><code>- item</code></td><td>bullet list</td><td><code>1. item</code></td><td>numbered list</td></tr>
+          <tr><td colspan="4"><code>```python<br>code block<br>```</code></td></tr>
+        </table>
+      </section>
+      <section>
+        <h4>Issue keys</h4>
+        <p>Auto-generated from session name initials — <code>infra</code> → <code>INFRA-1</code>, <code>my-project</code> → <code>MP-2</code>. Use the key to cross-reference issues in descriptions or commit messages.</p>
+      </section>
+      <section>
+        <h4>Tips for AI sessions</h4>
+        <ul>
+          <li>File one issue per distinct concern — don't bundle unrelated work.</li>
+          <li>Link related issues by key in the description (<code>see INFRA-3</code>).</li>
+          <li>Use <strong>Done</strong> only when a human can independently verify the outcome.</li>
+          <li>If a task is blocked or needs a decision, note it in <em>Why</em> and leave it <strong>To Do</strong>.</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+</div>
+<!-- Board card "add" small modal -->
+<div id="board-edit-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeBoardEdit()">
+  <div class="board-edit-box">
+    <input id="be-title" type="text" placeholder="Title" autocomplete="off"
+      onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('be-desc').focus();}">
+    <textarea id="be-desc" placeholder="Description (optional)"></textarea>
+    <select id="be-session-add" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-size:0.85rem;font-family:inherit;margin-bottom:0;"></select>
+    <select id="be-status"><option value="todo">To Do</option><option value="doing">In Progress</option><option value="done">Done</option></select>
+    <div class="board-edit-actions">
+      <button class="be-cancel" onclick="closeBoardEdit()">Cancel</button>
+      <button class="be-save" onclick="saveBoardEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Board card detail (full-screen) -->
+<div id="board-detail-overlay" class="overlay">
+  <div class="overlay-header">
+    <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+      <button class="btn" onclick="closeBoardDetail()">&#x2190; Back</button>
+      <span id="bd-key" class="board-detail-key"></span>
+    </div>
+    <button class="btn" onclick="boardDetailDelete()" style="color:var(--red);border-color:rgba(248,81,73,0.3);">Delete</button>
+  </div>
+  <div class="board-detail-body">
+    <textarea id="bd-title" class="board-detail-title-input" placeholder="Untitled" autocomplete="off" autocorrect="on" spellcheck="true" rows="1" oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
+    <div class="board-detail-status-row" id="bd-status-row"></div>
+    <div class="board-detail-row">
+      <span style="font-size:0.78rem;color:var(--dim);">Session:</span>
+      <select id="bd-session" class="board-detail-session-select"></select>
+    </div>
+    <div class="board-detail-tabs">
+      <button class="board-detail-tab active" id="bd-tab-edit" onclick="boardDetailTab('edit')">Edit</button>
+      <button class="board-detail-tab" id="bd-tab-preview" onclick="boardDetailTab('preview')">Preview</button>
+    </div>
+    <textarea id="bd-desc" class="board-detail-desc-input" placeholder="Add notes, description, or context... (supports Markdown)"></textarea>
+    <div id="bd-preview" class="board-detail-preview" style="display:none;"></div>
+    <div class="board-detail-meta" id="bd-meta"></div>
+  </div>
+  <div class="board-detail-footer">
+    <span id="bd-save-status" style="font-size:0.78rem;color:var(--dim);"></span>
+    <button class="btn primary" onclick="boardDetailSave()">Save</button>
+  </div>
+</div>
 
 <!-- Create session modal -->
 <div id="create-overlay" class="edit-overlay" onclick="if(event.target===this)closeCreate()">
   <div class="edit-box">
     <h3>New session</h3>
     <input id="create-name" type="text" placeholder="Session name" autocomplete="off" autocorrect="off"
-      onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('create-dir').focus();}">
+      onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('create-dir').focus({preventScroll:true});}">
     <div class="ac-wrap">
       <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
         oninput="acFetch(this.value)" onfocus="acFetch(this.value)"
@@ -1015,7 +1791,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- Peek overlay -->
 <div id="peek-overlay" class="overlay">
   <div class="overlay-header">
-    <h2 id="peek-title">peek</h2>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <h2 id="peek-title">peek</h2>
+      <span id="peek-conn-status" class="conn-status online"></span>
+    </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <div class="search-wrap" id="peek-search-wrap">
         <input class="search-input" id="peek-search" type="text" placeholder="Find..." autocomplete="off" autocorrect="off"
@@ -1026,7 +1805,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
   </div>
-  <div id="peek-body" class="overlay-body"></div>
+  <div style="position:relative;flex:1;min-height:0;">
+    <div id="peek-body" class="overlay-body" style="position:absolute;inset:0;"></div>
+    <button class="peek-copy-btn" id="peek-copy-btn" onclick="copyPeekContent()" title="Copy all">&#x2398; Copy</button>
+  </div>
   <div id="peek-status" class="overlay-status"></div>
   <div class="peek-cmd-bar">
     <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25B2; Send command</button>
@@ -1043,7 +1825,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="ac-wrap" style="flex:1;">
         <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a command..."
           autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
-          enterkeyhint="send" style="width:100%;"
+          enterkeyhint="enter" style="width:100%;"
           oninput="autoGrow(this);slashAcUpdate()" onkeydown="slashAcKeydown(event)"></textarea>
         <div id="slash-ac-list" class="ac-list slash-ac"></div>
       </div>
@@ -1058,12 +1840,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3 id="edit-title">Edit</h3>
     <div class="ac-wrap" id="edit-input-wrap">
       <input id="edit-input" type="text" autocomplete="off" autocorrect="off"
-        oninput="if(editState&&editState.field==='dir')editAcFetch(this.value)"
-        onfocus="if(editState&&editState.field==='dir')editAcFetch(this.value)"
+        oninput="if(editState&&editState.field==='dir')editAcFetch(this.value);if(editState&&editState.field==='tags')tagAcUpdate(this.value)"
+        onfocus="if(editState&&editState.field==='dir')editAcFetch(this.value);if(editState&&editState.field==='tags')tagAcUpdate(this.value)"
         onkeydown="editAcKeydown(event)">
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
-    <select id="edit-select" style="display:none;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--fg);font-size:0.9rem;">
+    <select id="edit-select" style="display:none;width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text);font-size:0.9rem;-webkit-appearance:menulist;" onchange="submitEdit()">
       <option value="">Default (sonnet)</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
@@ -1090,6 +1872,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="closeQueueModal()">Close</button>
     </div>
   </div>
+</div>
+
+<!-- About modal -->
+<div id="about-overlay" class="queue-overlay" onclick="if(event.target===this)this.classList.remove('active')">
+  <div class="queue-box" style="max-width:340px;">
+    <div style="text-align:center;">
+      <h3 style="margin:0 0 4px;">cmux</h3>
+      <div style="color:var(--dim);font-size:0.8rem;">Claude Code Multiplexer</div>
+      <div style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">v0.5.0 &#x21BB;</div>
+      <div id="update-status" style="color:var(--dim);font-size:0.75rem;min-height:1.2em;"></div>
+    </div>
+    <div id="daily-stats" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+      <div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading token stats...</div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;">
+      <button class="btn" onclick="document.getElementById('about-overlay').classList.remove('active')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sync activity banner -->
+<div id="sync-banner" class="sync-banner">
+  <div class="sync-title">
+    <span id="sync-title-text">Syncing...</span>
+    <button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="document.getElementById('sync-banner').classList.remove('active')">Dismiss</button>
+  </div>
+  <div id="sync-items"></div>
 </div>
 
 <!-- Toast -->
@@ -1119,6 +1928,8 @@ let lastPeekHTML = '';
 
 // Connection & offline state
 let online = true;
+window.addEventListener('offline', () => setOnline(false));
+window.addEventListener('online', () => { consecutiveFailures = 0; setOnline(true); });
 // Migrate localStorage keys from cc_ to cmux_
 ['offline_queue','sessions_cache','drafts'].forEach(k => {
   const old = localStorage.getItem('cc_' + k);
@@ -1128,6 +1939,10 @@ let online = true;
   }
 });
 let offlineQueue = JSON.parse(localStorage.getItem('cmux_offline_queue') || '[]');
+function saveQueue() {
+  saveQueue();
+  if (typeof _idb !== 'undefined') _idb.set('offline_queue', offlineQueue);
+}
 
 // ═══════ DRAFTS — offline-created sessions ═══════
 let drafts = JSON.parse(localStorage.getItem('cmux_drafts') || '[]');
@@ -1135,6 +1950,7 @@ let drafts = JSON.parse(localStorage.getItem('cmux_drafts') || '[]');
 
 function saveDrafts() {
   localStorage.setItem('cmux_drafts', JSON.stringify(drafts));
+  if (typeof _idb !== 'undefined') _idb.set('drafts', drafts);
 }
 
 function addDraft(name, dir, prompt) {
@@ -1196,16 +2012,17 @@ function describeOp(item) {
 
 // Connection status
 function updateConnectionStatus() {
-  const el = document.getElementById('conn-status');
-  if (!el) return;
-  if (online) {
-    el.className = 'conn-status online';
-    el.textContent = '';
-  } else {
-    el.className = 'conn-status offline';
-    const total = offlineQueue.length + drafts.length;
-    el.textContent = total ? total + ' pending' : 'offline';
-  }
+  // Update all connection status indicators (main + peek)
+  document.querySelectorAll('#conn-status, #peek-conn-status').forEach(el => {
+    if (online) {
+      el.className = 'conn-status online';
+      el.textContent = 'Live';
+    } else {
+      el.className = 'conn-status offline';
+      const total = offlineQueue.length + drafts.length;
+      el.textContent = total ? total + ' pending' : 'Offline';
+    }
+  });
   // Update offline banner
   const banner = document.getElementById('offline-banner');
   const ops = document.getElementById('offline-ops');
@@ -1246,10 +2063,100 @@ function setOnline(val) {
   updateConnectionStatus();
   if (!was && val) {
     showToast('Reconnected — syncing...');
-    syncDrafts().then(() => replayQueue());
+    runSyncBanner();
   } else if (was && !val) {
     showToast('Server unreachable — offline mode');
   }
+}
+
+// ═══════ SYNC BANNER ORCHESTRATOR ═══════
+async function runSyncBanner() {
+  const banner = document.getElementById('sync-banner');
+  const itemsEl = document.getElementById('sync-items');
+  const titleEl = document.getElementById('sync-title-text');
+  const draftCount = drafts.length;
+  const rawQueue = [...offlineQueue];
+  offlineQueue = [];
+  saveQueue();
+  const queue = reconcileQueue(rawQueue);
+  const skipped = rawQueue.length - queue.length;
+  const totalOps = draftCount + queue.length;
+  if (!totalOps) return;
+
+  // Build item list
+  const items = [];
+  drafts.forEach(d => items.push({ label: 'Create & start "' + d.name + '"', status: 'pending', type: 'draft', draft: d }));
+  queue.forEach(q => items.push({ label: describeOp(q), status: 'pending', type: 'queue', item: q }));
+
+  function renderBanner() {
+    const done = items.filter(i => i.status === 'done').length;
+    const failed = items.filter(i => i.status === 'failed').length;
+    titleEl.textContent = 'Syncing ' + done + '/' + items.length + (failed ? ' (' + failed + ' failed)' : '') + (skipped ? ' (' + skipped + ' skipped)' : '');
+    itemsEl.innerHTML = items.map(i => {
+      const icon = i.status === 'done' ? '&#x2714;' : i.status === 'failed' ? '&#x2718;' : i.status === 'running' ? '&#x27A4;' : '&#x2022;';
+      return '<div class="sync-item ' + i.status + '">' + icon + ' ' + esc(i.label) + '</div>';
+    }).join('');
+  }
+
+  renderBanner();
+  banner.classList.add('active');
+
+  // Sync drafts first
+  for (const item of items.filter(i => i.type === 'draft')) {
+    item.status = 'running';
+    renderBanner();
+    try {
+      const draft = item.draft;
+      draft.syncing = true; saveDrafts(); render();
+      const createResp = await fetch(API + '/api/sessions', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name: draft.name, dir: draft.dir })
+      });
+      if (!createResp.ok && createResp.status !== 409) {
+        item.status = 'failed'; draft.syncing = false; saveDrafts(); renderBanner(); continue;
+      }
+      const startResp = await fetch(API + '/api/sessions/' + encodeURIComponent(draft.name) + '/start', { method: 'POST' });
+      if (draft.prompt && startResp.ok) {
+        await new Promise(r => setTimeout(r, 5000));
+        await fetch(API + '/api/sessions/' + encodeURIComponent(draft.name) + '/send', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ text: draft.prompt })
+        });
+      }
+      removeDraft(draft.name); render();
+      item.status = 'done';
+    } catch(e) {
+      item.status = 'failed'; item.draft.syncing = false; saveDrafts();
+    }
+    renderBanner();
+  }
+
+  // Then replay queue items
+  for (const item of items.filter(i => i.type === 'queue')) {
+    item.status = 'running';
+    renderBanner();
+    try {
+      const r = await fetch(item.item.url, item.item.options);
+      if (r.status >= 500) {
+        offlineQueue.push(item.item); item.status = 'failed';
+      } else {
+        item.status = 'done';
+      }
+    } catch(e) {
+      offlineQueue.push(item.item); item.status = 'failed';
+    }
+    renderBanner();
+  }
+
+  if (offlineQueue.length) saveQueue();
+  const doneCount = items.filter(i => i.status === 'done').length;
+  const failCount = items.filter(i => i.status === 'failed').length;
+  titleEl.textContent = doneCount + ' synced' + (failCount ? ', ' + failCount + ' failed' : '') + (skipped ? ', ' + skipped + ' skipped' : '');
+  updateConnectionStatus();
+  fetchSessions();
+  fetchBoard();
+  // Auto-dismiss after 4s if all succeeded
+  if (!failCount) setTimeout(() => banner.classList.remove('active'), 4000);
 }
 
 // Queue modal
@@ -1272,7 +2179,7 @@ function closeQueueModal() {
 }
 function clearQueue() {
   offlineQueue = [];
-  localStorage.removeItem('cmux_offline_queue');
+  saveQueue();
   updateConnectionStatus();
   closeQueueModal();
   showToast('Queue cleared');
@@ -1283,31 +2190,34 @@ async function forceRetry() {
   setOnline(true);
 }
 
-// apiCall — wraps mutation fetches with offline queuing
+// apiCall — wraps mutation fetches; queues when offline or server unreachable
 async function apiCall(url, options) {
-  if (online) {
-    try {
-      const r = await fetch(url, options);
-      consecutiveFailures = 0;
-      if (!online) setOnline(true);
-      return r;
-    } catch(e) {
-      consecutiveFailures++;
-      if (consecutiveFailures >= 3) setOnline(false);
-      // Queue the failed mutation
-      offlineQueue.push({ url, options: { method: options.method, headers: options.headers, body: options.body }, timestamp: Date.now() });
-      localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
-      updateConnectionStatus();
-      showToast('Queued (' + offlineQueue.length + ' pending)');
-      return null;
-    }
-  } else {
-    offlineQueue.push({ url, options: { method: options.method, headers: options.headers, body: options.body }, timestamp: Date.now() });
-    localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
-    updateConnectionStatus();
-    showToast('Queued (' + offlineQueue.length + ' pending)');
+  if (!online) {
+    _queueOp(url, options);
     return null;
   }
+  try {
+    const r = await fetch(url, options);
+    if (!r.ok) {
+      showToast('Error: ' + r.status);
+      return null;
+    }
+    consecutiveFailures = 0;
+    return r;
+  } catch(e) {
+    // Server unreachable despite having internet — queue and mark offline
+    console.error('apiCall failed:', e);
+    consecutiveFailures++;
+    if (consecutiveFailures >= 2) setOnline(false);
+    _queueOp(url, options);
+    return null;
+  }
+}
+function _queueOp(url, options) {
+  offlineQueue.push({ url, options: { method: options.method, headers: options.headers, body: options.body }, timestamp: Date.now() });
+  saveQueue();
+  updateConnectionStatus();
+  showToast('Queued (' + offlineQueue.length + ' pending)');
 }
 
 // Reconcile queue: remove contradictory/stale operations before replay
@@ -1338,106 +2248,7 @@ function reconcileQueue(queue) {
   return queue.filter((_, i) => !dominated.has(i));
 }
 
-// Queue replay on reconnect
-async function replayQueue() {
-  if (!offlineQueue.length) return;
-  const raw = [...offlineQueue];
-  offlineQueue = [];
-  localStorage.removeItem('cmux_offline_queue');
-  // Reconcile before replaying
-  const queue = reconcileQueue(raw);
-  const skipped = raw.length - queue.length;
-  if (skipped) showToast('Skipped ' + skipped + ' superseded ops');
-  showToast('Syncing ' + queue.length + ' operation' + (queue.length === 1 ? '' : 's') + '...');
-  let synced = 0, failed = 0;
-  for (const item of queue) {
-    try {
-      const r = await fetch(item.url, item.options);
-      if (r.status >= 500) {
-        offlineQueue.push(item);
-        failed++;
-      } else {
-        synced++;
-      }
-      // 4xx = stale, discard silently (session gone, etc.)
-    } catch(e) {
-      offlineQueue.push(item);
-      failed++;
-    }
-  }
-  if (failed) {
-    localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
-    showToast(synced + ' synced, ' + failed + ' re-queued');
-  } else {
-    showToast('All ' + synced + ' operation' + (synced === 1 ? '' : 's') + ' synced');
-  }
-  updateConnectionStatus();
-  fetchSessions();
-}
-
-// ═══════ DRAFT SYNC ENGINE ═══════
-// On reconnect: create draft sessions → start → send prompts, one by one
-async function syncDrafts() {
-  if (!drafts.length) return;
-  const toSync = [...drafts];
-  showToast('Syncing ' + toSync.length + ' draft' + (toSync.length === 1 ? '' : 's') + '...');
-
-  for (const draft of toSync) {
-    draft.syncing = true;
-    saveDrafts();
-    render();
-
-    try {
-      // 1. Create session on server
-      const createResp = await fetch(API + '/api/sessions', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name: draft.name, dir: draft.dir })
-      });
-
-      if (!createResp.ok) {
-        const err = await createResp.json().catch(() => ({}));
-        // 409 = already exists, treat as success
-        if (createResp.status !== 409) {
-          showToast('Failed to create ' + draft.name + ': ' + (err.error || 'server error'));
-          draft.syncing = false;
-          saveDrafts();
-          continue;
-        }
-      }
-
-      // 2. Start the session
-      const startResp = await fetch(API + '/api/sessions/' + encodeURIComponent(draft.name) + '/start', {
-        method: 'POST'
-      });
-
-      // 3. If there's a prompt, wait for Claude to init then send it
-      if (draft.prompt && startResp.ok) {
-        showToast('Started ' + draft.name + ', sending prompt in 5s...');
-        await new Promise(r => setTimeout(r, 5000));
-        await fetch(API + '/api/sessions/' + encodeURIComponent(draft.name) + '/send', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ text: draft.prompt })
-        });
-        showToast('Sent prompt to ' + draft.name);
-      }
-
-      // Success — remove draft
-      removeDraft(draft.name);
-      render();
-    } catch(e) {
-      // Network error — stop syncing, will retry on next reconnect
-      draft.syncing = false;
-      saveDrafts();
-      showToast('Sync interrupted — will retry when connected');
-      return;
-    }
-  }
-
-  if (!drafts.length) {
-    showToast('All drafts synced');
-  }
-  fetchSessions();
-}
+// (replayQueue and syncDrafts merged into runSyncBanner above)
 
 // ═══════ API & CONNECTION ═══════
 let lastSessionsJSON = '';
@@ -1457,16 +2268,8 @@ async function fetchSessions() {
   } catch(e) {
     console.error('fetch sessions:', e);
     consecutiveFailures++;
-    if (consecutiveFailures >= 3 && online) {
+    if (consecutiveFailures >= 2 || navigator.onLine === false) {
       setOnline(false);
-      // Load cached sessions for offline view
-      const cached = localStorage.getItem('cmux_sessions_cache');
-      if (cached) {
-        try {
-          sessions = JSON.parse(cached);
-          render();
-        } catch(ex) {}
-      }
     }
   }
 }
@@ -1537,10 +2340,12 @@ function render() {
     const flags = s.flags || '';
     const isYolo = flags.includes('--dangerously-skip-permissions');
     const modelMatch = flags.match(/--model\s+(\S+)/);
-    const model = modelMatch ? modelMatch[1] : null;
+    const flagModel = modelMatch ? modelMatch[1] : null;
+    const model = s.active_model || flagModel || null;
+    const shortModel = model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
     return `
     <div class="card ${isExp ? 'expanded' : ''}" onclick="toggle('${s.name}')">
-      <div class="card-header">
+      <div class="card-header" onclick="headerTap('${s.name}', event)">
         <div class="dot ${s.running ? 'running' : 'stopped'}"></div>
         <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${esc(s.name)}</div>
         ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
@@ -1574,28 +2379,33 @@ function render() {
         ${s.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}
       </div>` : ''}
       <div class="panel" onclick="event.stopPropagation()">
-        ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
+        ${isExp && s.task_name ? `<div class="card-task-name"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
+        ${isExp && s.running ? `<div class="card-timing">
+          ${s.session_created ? `<div class="timing-item"><span class="timing-label">Session</span><span class="timing-value">${fmtDuration(Math.floor(Date.now()/1000) - s.session_created)}</span></div>` : ''}
+          ${s.task_time ? `<div class="timing-item"><span class="timing-label">Task</span><span class="timing-value accent">${esc(s.task_time)}</span></div>` : ''}
+        </div>` : ''}
+        ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines" onclick="event.stopPropagation();openPeek('${s.name}')" style="cursor:pointer;">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
         <div class="card-stats" id="stats-${s.name}"></div>
         <div class="panel-actions">
-          <button class="btn primary" onclick="openPeek('${s.name}')">Peek</button>
           ${!s.running ? `<button class="btn" id="start-btn-${s.name}" onclick="this.textContent='Starting...';this.disabled=true;doStart('${s.name}')">Start</button>` : ''}
         </div>
         ${s.running ? `
         <div class="chips">
-          <div class="chip" onclick="doSend('${s.name}','/compact')">/compact</div>
-          <div class="chip" onclick="doSend('${s.name}','/status')">/status</div>
-          <div class="chip" onclick="doSend('${s.name}','/clear')">/clear</div>
-          <div class="chip" onclick="doSend('${s.name}','/cost')">/cost</div>
+          <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
+          <div class="chip" onclick="chipToInput('${s.name}','/status')">/status</div>
+          <div class="chip" onclick="chipToInput('${s.name}','/clear')">/clear</div>
+          <div class="chip" onclick="chipToInput('${s.name}','/cost')">/cost</div>
           <div class="chip" onclick="doKeys('${s.name}','C-c')">Ctrl-C</div>
           <div class="chip" onclick="doKeys('${s.name}','Escape')">Esc</div>
           <div class="chip" onclick="doKeys('${s.name}','Enter')">Enter</div>
         </div>
-        <div class="send-row">
+        <div class="send-row" style="position:relative;">
+          <div id="card-ac-${s.name}" class="ac-list slash-ac"></div>
           <textarea class="send-input" id="input-${s.name}" rows="1"
             placeholder="Send to ${esc(s.name)}..." autocomplete="off" autocorrect="on"
-            autocapitalize="sentences" spellcheck="true" enterkeyhint="send"
-            oninput="autoGrow(this)"
-            onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendFromInput('${s.name}');}"></textarea>
+            autocapitalize="sentences" spellcheck="true" enterkeyhint="enter"
+            oninput="autoGrow(this);cardSlashAcUpdate('${s.name}')"
+            onkeydown="cardSlashAcKeydown('${s.name}',event)"></textarea>
           <button class="btn primary" onclick="sendFromInput('${s.name}')">Send</button>
         </div>` : ''}
       </div>
@@ -1612,7 +2422,7 @@ function render() {
   }
   if (focusedId) {
     const inp = document.getElementById(focusedId);
-    if (inp) inp.focus();
+    if (inp) inp.focus({ preventScroll: true });
   }
 }
 
@@ -1630,16 +2440,34 @@ function timeAgo(epoch) {
   if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
   return Math.floor(diff/86400) + 'd ago';
 }
+function fmtDuration(sec) {
+  if (sec < 0) sec = 0;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm';
+  return sec + 's';
+}
 
 function toggle(name) {
   expanded = expanded === name ? null : name;
   closeAllMenus();
   render();
   if (expanded) {
-    const inp = document.getElementById('input-' + name);
-    if (inp) setTimeout(() => inp.focus(), 100);
     fetchStats(name);
   }
+}
+// Double-tap header to peek
+let _lastHeaderTap = { name: null, time: 0 };
+function headerTap(name, e) {
+  const now = Date.now();
+  if (_lastHeaderTap.name === name && now - _lastHeaderTap.time < 400) {
+    e.stopPropagation();
+    openPeek(name);
+    _lastHeaderTap = { name: null, time: 0 };
+    return;
+  }
+  _lastHeaderTap = { name, time: now };
 }
 
 async function fetchStats(name) {
@@ -1670,10 +2498,24 @@ function toggleMenu(name) {
   if (btn) {
     const r = btn.getBoundingClientRect();
     const vw = document.documentElement.clientWidth || window.innerWidth;
-    let left = r.right - 200; // menu min-width is 200, align right edge to button right
+    const vh = window.innerHeight;
+    let left = r.right - 200;
     if (left < 8) left = 8;
     if (left + 200 > vw) left = vw - 208;
-    el.style.top = (r.bottom + 4) + 'px';
+    // Check if menu would overflow bottom of viewport — if so, open upward
+    el.style.maxHeight = '';
+    const spaceBelow = vh - r.bottom - 8;
+    const spaceAbove = r.top - 8;
+    if (spaceBelow < 260 && spaceAbove > spaceBelow) {
+      // Open upward
+      el.style.bottom = (vh - r.top + 4) + 'px';
+      el.style.top = 'auto';
+      el.style.maxHeight = Math.min(500, spaceAbove) + 'px';
+    } else {
+      el.style.top = (r.bottom + 4) + 'px';
+      el.style.bottom = 'auto';
+      el.style.maxHeight = Math.min(500, spaceBelow) + 'px';
+    }
     el.style.left = left + 'px';
     el.style.right = 'auto';
   }
@@ -1779,13 +2621,14 @@ function editField(session, field, current) {
   }
   document.getElementById('edit-overlay').classList.add('active');
   editState = { session, field };
-  if (field !== 'model') setTimeout(() => { inp.focus(); inp.select(); }, 100);
+  if (field !== 'model') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
 }
 function closeEdit() {
   document.getElementById('edit-overlay').classList.remove('active');
   document.getElementById('edit-ac-list').classList.remove('open');
   document.getElementById('edit-input-wrap').style.display = '';
   document.getElementById('edit-select').style.display = 'none';
+  tagAcItems = []; tagAcSelected = -1;
   editState = null;
 }
 async function submitEdit() {
@@ -1866,25 +2709,35 @@ function editAcPick(i) {
 }
 function editAcKeydown(e) {
   const el = document.getElementById('edit-ac-list');
+  const isTagField = editState && editState.field === 'tags';
+  const acItems = isTagField ? tagAcItems : editAcItems;
+  const pickFn = isTagField ? tagAcPick : editAcPick;
+  const highlightFn = isTagField ? (() => {
+    const items = el.querySelectorAll('.ac-item');
+    items.forEach((item, i) => item.classList.toggle('selected', i === tagAcSelected));
+    if (items[tagAcSelected]) items[tagAcSelected].scrollIntoView({ block: 'nearest' });
+  }) : editAcHighlight;
   if (!el.classList.contains('open')) {
     if (e.key === 'Enter') { e.preventDefault(); submitEdit(); }
     return;
   }
   if (e.key === 'ArrowDown') {
     e.preventDefault();
-    editAcSelected = Math.min(editAcSelected + 1, editAcItems.length - 1);
-    editAcHighlight();
+    if (isTagField) { tagAcSelected = Math.min(tagAcSelected + 1, acItems.length - 1); highlightFn(); }
+    else { editAcSelected = Math.min(editAcSelected + 1, acItems.length - 1); highlightFn(); }
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
-    editAcSelected = Math.max(editAcSelected - 1, 0);
-    editAcHighlight();
+    if (isTagField) { tagAcSelected = Math.max(tagAcSelected - 1, 0); highlightFn(); }
+    else { editAcSelected = Math.max(editAcSelected - 1, 0); highlightFn(); }
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (editAcSelected >= 0) editAcPick(editAcSelected);
+    const sel = isTagField ? tagAcSelected : editAcSelected;
+    if (sel >= 0) pickFn(sel);
     else { el.classList.remove('open'); submitEdit(); }
-  } else if (e.key === 'Tab' && editAcItems.length) {
+  } else if (e.key === 'Tab' && acItems.length) {
     e.preventDefault();
-    editAcPick(editAcSelected >= 0 ? editAcSelected : 0);
+    const sel = isTagField ? tagAcSelected : editAcSelected;
+    pickFn(sel >= 0 ? sel : 0);
   } else if (e.key === 'Escape') {
     el.classList.remove('open');
   }
@@ -1893,6 +2746,35 @@ function editAcHighlight() {
   const items = document.getElementById('edit-ac-list').querySelectorAll('.ac-item');
   items.forEach((el, i) => el.classList.toggle('selected', i === editAcSelected));
   if (items[editAcSelected]) items[editAcSelected].scrollIntoView({ block: 'nearest' });
+}
+
+// ── Tag autocomplete ──
+let tagAcItems = [];
+let tagAcSelected = -1;
+function tagAcUpdate(val) {
+  const el = document.getElementById('edit-ac-list');
+  const parts = val.split(',');
+  const token = parts[parts.length - 1].trim().toLowerCase();
+  if (!token) { el.classList.remove('open'); tagAcItems = []; return; }
+  const used = parts.slice(0, -1).map(p => p.trim().toLowerCase());
+  const allTags = [...new Set(sessions.flatMap(s => s.tags || []))];
+  tagAcItems = allTags.filter(t => t.toLowerCase().startsWith(token) && !used.includes(t.toLowerCase()));
+  tagAcSelected = -1;
+  if (!tagAcItems.length) { el.classList.remove('open'); return; }
+  el.innerHTML = tagAcItems.map((t, i) =>
+    `<div class="ac-item" onmousedown="tagAcPick(${i})">${esc(t)}</div>`
+  ).join('');
+  el.classList.add('open');
+}
+function tagAcPick(i) {
+  const inp = document.getElementById('edit-input');
+  const parts = inp.value.split(',');
+  const prefix = parts.length > 1 ? ' ' : '';
+  parts[parts.length - 1] = prefix + tagAcItems[i];
+  inp.value = parts.join(',');
+  document.getElementById('edit-ac-list').classList.remove('open');
+  tagAcItems = [];
+  inp.focus({ preventScroll: true });
 }
 
 async function toggleYolo(session) {
@@ -1959,7 +2841,43 @@ async function doStop(name) {
   await fetchSessions();
 }
 
+// ── Sending indicator ──
+let _sendingSnapshot = null; // peek HTML snapshot before send
+let _sendingTimer = null;
+
+function showSendingIndicator() {
+  // Snapshot current peek output to detect change
+  _sendingSnapshot = lastPeekHTML;
+  // Show in peek mode if open
+  const peekWrap = document.querySelector('#peek-body')?.parentElement;
+  if (peekWrap && document.getElementById('peek-overlay')?.classList.contains('active')) {
+    let ind = document.getElementById('sending-ind');
+    if (!ind) {
+      ind = document.createElement('div');
+      ind.id = 'sending-ind';
+      ind.className = 'sending-indicator';
+      ind.textContent = 'Sending\u2026';
+      peekWrap.appendChild(ind);
+    }
+    ind.style.display = '';
+    // Rapid refresh burst to detect output change quickly
+    setTimeout(refreshPeek, 500);
+    setTimeout(refreshPeek, 1500);
+  }
+  // Auto-clear after 15s as safety net
+  clearTimeout(_sendingTimer);
+  _sendingTimer = setTimeout(clearSendingIndicator, 15000);
+}
+
+function clearSendingIndicator() {
+  _sendingSnapshot = null;
+  clearTimeout(_sendingTimer);
+  const ind = document.getElementById('sending-ind');
+  if (ind) ind.style.display = 'none';
+}
+
 async function doSend(name, text) {
+  showSendingIndicator();
   await apiCall(API + '/api/sessions/' + name + '/send', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({text})
@@ -1967,6 +2885,7 @@ async function doSend(name, text) {
 }
 
 async function doKeys(name, keys) {
+  showSendingIndicator();
   await apiCall(API + '/api/sessions/' + name + '/keys', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({keys})
@@ -1988,7 +2907,8 @@ async function sendFromInput(name) {
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
 }
 
-async function openPeek(name) {
+function openPeek(name) {
+  if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   peekSession = name;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
   peekSearchQuery = '';
@@ -2000,10 +2920,35 @@ async function openPeek(name) {
   document.getElementById('peek-cmd-toggle').innerHTML = '&#x25B2; Send command';
   document.getElementById('peek-cmd-input').value = '';
   document.getElementById('peek-title').textContent = name;
+  document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
+  updateConnectionStatus();
   document.getElementById('peek-overlay').classList.add('active');
   document.body.style.overflow = 'hidden';
-  await refreshPeek();
+  // Load cached peek instantly while fetching fresh data
+  _idb.get('peek_' + name).then(cached => {
+    if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
+      lastPeekHTML = linkifyOutput(stripAnsi(cached.output));
+      applyPeekSearch();
+      const ago = Math.floor((Date.now() - cached.time) / 60000);
+      document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
+      const body = document.getElementById('peek-body');
+      body.scrollTop = body.scrollHeight;
+    }
+  });
+  refreshPeek();
   peekTimer = setInterval(refreshPeek, 3000);
+}
+
+function copyPeekContent() {
+  const body = document.getElementById('peek-body');
+  if (!body) return;
+  const text = body.innerText || body.textContent || '';
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('peek-copy-btn');
+    btn.innerHTML = '&#x2713; Copied';
+    btn.style.color = '#4ade80';
+    setTimeout(() => { btn.innerHTML = '&#x2398; Copy'; btn.style.color = ''; }, 1500);
+  }).catch(() => showToast('Copy failed'));
 }
 
 function closePeek() {
@@ -2095,16 +3040,38 @@ async function refreshPeek() {
   if (peekSelecting) return;
   const sel = window.getSelection();
   if (sel && sel.toString().length > 0) return;
+  const body = document.getElementById('peek-body');
+  const statusEl = document.getElementById('peek-status');
   try {
     const r = await fetch(API + '/api/sessions/' + peekSession + '/peek?lines=500');
     const data = await r.json();
-    const body = document.getElementById('peek-body');
+    const output = data.output || '(no output)';
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-    lastPeekHTML = linkifyOutput(stripAnsi(data.output || '(no output)'));
+    const newHTML = linkifyOutput(stripAnsi(output));
+    // Clear sending indicator when output changes
+    if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
+    lastPeekHTML = newHTML;
     applyPeekSearch();
     if (atBottom) body.scrollTop = body.scrollHeight;
-    document.getElementById('peek-status').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  } catch(e) { console.error('peek:', e); }
+    statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
+    // Cache peek output for offline browsing
+    _idb.set('peek_' + peekSession, { output, time: Date.now() });
+  } catch(e) {
+    console.error('peek:', e);
+    // Offline: load cached peek
+    if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
+      const cached = await _idb.get('peek_' + peekSession);
+      if (cached) {
+        lastPeekHTML = linkifyOutput(stripAnsi(cached.output));
+        applyPeekSearch();
+        const ago = Math.floor((Date.now() - cached.time) / 60000);
+        statusEl.textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
+      } else {
+        body.innerHTML = '<span style="color:var(--dim)">No cached output available</span>';
+        statusEl.textContent = 'Offline — no cache';
+      }
+    }
+  }
 }
 
 function applyPeekSearch() {
@@ -2140,7 +3107,7 @@ function togglePeekCmd() {
   const toggle = document.getElementById('peek-cmd-toggle');
   row.classList.toggle('open', peekCmdOpen);
   toggle.innerHTML = peekCmdOpen ? '&#x25BC; Send command' : '&#x25B2; Send command';
-  if (peekCmdOpen) setTimeout(() => document.getElementById('peek-cmd-input').focus(), 50);
+  if (peekCmdOpen) setTimeout(() => document.getElementById('peek-cmd-input').focus({ preventScroll: true }), 50);
 }
 async function sendPeekCmd() {
   if (!peekSession) return;
@@ -2209,13 +3176,13 @@ function slashAcPick(i) {
   inp.value = slashAcItems[i].cmd;
   document.getElementById('slash-ac-list').classList.remove('open');
   slashAcItems = [];
-  inp.focus();
+  inp.focus({ preventScroll: true });
 }
 
 function slashAcKeydown(e) {
   const el = document.getElementById('slash-ac-list');
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPeekCmd(); }
     return;
   }
   if (e.key === 'ArrowUp') {
@@ -2229,7 +3196,7 @@ function slashAcKeydown(e) {
   } else if (e.key === 'Enter') {
     e.preventDefault();
     if (slashAcSelected >= 0) slashAcPick(slashAcSelected);
-    else { el.classList.remove('open'); sendPeekCmd(); }
+    else { el.classList.remove('open'); }
   } else if (e.key === 'Tab' && slashAcItems.length) {
     e.preventDefault();
     slashAcPick(slashAcSelected >= 0 ? slashAcSelected : 0);
@@ -2242,6 +3209,84 @@ function slashAcHighlight() {
   const items = document.getElementById('slash-ac-list').querySelectorAll('.ac-item');
   items.forEach((el, i) => el.classList.toggle('selected', i === slashAcSelected));
   if (items[slashAcSelected]) items[slashAcSelected].scrollIntoView({ block: 'nearest' });
+}
+
+// ── Chip populates input ──
+function chipToInput(name, text) {
+  const inp = document.getElementById('input-' + name);
+  if (!inp) return;
+  inp.value = text;
+  inp.focus({ preventScroll: true });
+  autoGrow(inp);
+  cardSlashAcUpdate(name);
+}
+
+// ── Card send input slash autocomplete ──
+let _cardAcItems = [];
+let _cardAcSelected = -1;
+let _cardAcName = '';
+
+function cardSlashAcUpdate(name) {
+  const inp = document.getElementById('input-' + name);
+  const el = document.getElementById('card-ac-' + name);
+  if (!inp || !el) return;
+  // Close any other card's autocomplete
+  if (_cardAcName && _cardAcName !== name) {
+    const prev = document.getElementById('card-ac-' + _cardAcName);
+    if (prev) prev.classList.remove('open');
+  }
+  _cardAcName = name;
+  const val = inp.value;
+  if (!val.startsWith('/')) { el.classList.remove('open'); _cardAcItems = []; return; }
+  const q = val.toLowerCase();
+  _cardAcItems = SLASH_COMMANDS.filter(c => c.cmd.startsWith(q));
+  _cardAcSelected = -1;
+  if (!_cardAcItems.length) { el.classList.remove('open'); return; }
+  el.innerHTML = _cardAcItems.map((c, i) =>
+    `<div class="ac-item" onmousedown="cardSlashAcPick('${esc(name)}',${i})">${esc(c.cmd)}<span class="ac-desc">${esc(c.desc)}</span></div>`
+  ).join('');
+  el.classList.add('open');
+}
+
+function cardSlashAcPick(name, i) {
+  const inp = document.getElementById('input-' + name);
+  const el = document.getElementById('card-ac-' + name);
+  inp.value = _cardAcItems[i].cmd;
+  el.classList.remove('open');
+  _cardAcItems = [];
+  inp.focus({ preventScroll: true });
+}
+
+function cardSlashAcKeydown(name, e) {
+  const el = document.getElementById('card-ac-' + name);
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
+  if (!el || !el.classList.contains('open')) {
+    return;
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _cardAcSelected = _cardAcSelected <= 0 ? _cardAcItems.length - 1 : _cardAcSelected - 1;
+    cardSlashAcHighlight(name);
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _cardAcSelected = _cardAcSelected >= _cardAcItems.length - 1 ? 0 : _cardAcSelected + 1;
+    cardSlashAcHighlight(name);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (_cardAcSelected >= 0) cardSlashAcPick(name, _cardAcSelected);
+    else { el.classList.remove('open'); }
+  } else if (e.key === 'Tab' && _cardAcItems.length) {
+    e.preventDefault();
+    cardSlashAcPick(name, _cardAcSelected >= 0 ? _cardAcSelected : 0);
+  } else if (e.key === 'Escape') {
+    el.classList.remove('open');
+  }
+}
+
+function cardSlashAcHighlight(name) {
+  const items = document.getElementById('card-ac-' + name).querySelectorAll('.ac-item');
+  items.forEach((el, i) => el.classList.toggle('selected', i === _cardAcSelected));
+  if (items[_cardAcSelected]) items[_cardAcSelected].scrollIntoView({ block: 'nearest' });
 }
 
 // ── Search clear helpers ──
@@ -2386,7 +3431,7 @@ function openCreate() {
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   document.getElementById('create-overlay').classList.add('active');
-  setTimeout(() => document.getElementById('create-name').focus(), 100);
+  setTimeout(() => document.getElementById('create-name').focus({ preventScroll: true }), 100);
 }
 function closeCreate() {
   document.getElementById('create-overlay').classList.remove('active');
@@ -2396,7 +3441,7 @@ async function submitCreate() {
   const name = document.getElementById('create-name').value.trim();
   const dir = document.getElementById('create-dir').value.trim();
   const prompt = document.getElementById('create-prompt').value.trim();
-  if (!name) { document.getElementById('create-name').focus(); return; }
+  if (!name) { document.getElementById('create-name').focus({ preventScroll: true }); return; }
   closeCreate();
 
   if (!online) {
@@ -2492,6 +3537,12 @@ document.addEventListener('click', e => {
   if (!e.target.closest('.ac-wrap')) {
     document.getElementById('ac-list').classList.remove('open');
   }
+  // Close card slash autocomplete
+  if (!e.target.closest('.send-row') && _cardAcName) {
+    const el = document.getElementById('card-ac-' + _cardAcName);
+    if (el) el.classList.remove('open');
+    _cardAcItems = [];
+  }
 });
 
 // ═══════ EVENT HANDLERS ═══════
@@ -2514,6 +3565,15 @@ document.addEventListener('touchend', () => { peekCheckSelection(); });
 
 // Handle Ctrl+C as copy and Ctrl+V as paste in peek (Mac users may use Ctrl instead of Cmd)
 document.addEventListener('keydown', (e) => {
+  if (document.getElementById('board-guide-overlay').classList.contains('active')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeBoardGuide(); }
+    return;
+  }
+  if (document.getElementById('board-detail-overlay').classList.contains('active')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeBoardDetail(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); boardDetailSave(); return; }
+    return;
+  }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
   if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
     if (e.key === 'c') {
@@ -2538,13 +3598,637 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ═══════ BOARD ═══════
+let activeView = 'sessions';
+let boardItems = [];
+let boardTimer = null;
+let boardEditId = null;
+let boardEditStatus = 'todo';
+let lastBoardJSON = '';
+let boardFilterTag = null;
+let boardFilterSession = null;
+let _boardDragId = null;
+
+function switchView(view) {
+  activeView = view;
+  document.getElementById('session-view').style.display = view === 'sessions' ? '' : 'none';
+  document.getElementById('board-view').style.display = view === 'board' ? '' : 'none';
+  document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
+  document.getElementById('tab-board').classList.toggle('active', view === 'board');
+  if (view === 'board') {
+    renderBoard();
+    fetchBoard();
+    if (!boardTimer) boardTimer = setInterval(fetchBoard, 5000);
+  } else {
+    if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
+  }
+}
+
+async function fetchBoard() {
+  try {
+    const r = await fetch(API + '/api/board');
+    const data = await r.json();
+    consecutiveFailures = 0;
+    if (!online) setOnline(true);
+    const j = JSON.stringify(data);
+    if (j !== lastBoardJSON) {
+      lastBoardJSON = j;
+      boardItems = data;
+      localStorage.setItem('cmux_board_cache', j);
+      renderBoard();
+    }
+  } catch(e) {
+    console.error('fetch board:', e);
+    consecutiveFailures++;
+    if (consecutiveFailures >= 2 || navigator.onLine === false) {
+      setOnline(false);
+    }
+  }
+}
+
+function timeAgo(ts) {
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+function renderMarkdown(raw) {
+  if (!raw) return '';
+  const parts = raw.split(/(```[\s\S]*?```)/g);
+  return parts.map((part, i) => {
+    if (i % 2 === 1) {
+      const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
+      const lang = m ? esc(m[1]) : '';
+      const code = m ? esc(m[2]) : esc(part);
+      return '<pre><code' + (lang ? ' class="language-' + lang + '"' : '') + '>' + code + '</code></pre>';
+    }
+    let s = part.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+    s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    s = s.replace(/_(.+?)_/g, '<em>$1</em>');
+    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/^---$/gm, '<hr>');
+    s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+    s = s.replace(/((?:^[-*] .+\n?)+)/gm, (block) => {
+      const items = block.trim().split('\n').map(l => '<li>' + l.replace(/^[-*] /, '') + '</li>').join('');
+      return '<ul>' + items + '</ul>';
+    });
+    s = s.replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
+      const items = block.trim().split('\n').map(l => '<li>' + l.replace(/^\d+\. /, '') + '</li>').join('');
+      return '<ol>' + items + '</ol>';
+    });
+    s = s.replace(/\n\n+/g, '</p><p>');
+    s = s.replace(/\n/g, '<br>');
+    if (s && !s.startsWith('<h') && !s.startsWith('<ul') && !s.startsWith('<ol') && !s.startsWith('<blockquote') && !s.startsWith('<hr') && !s.startsWith('<pre')) {
+      s = '<p>' + s + '</p>';
+    }
+    return s;
+  }).join('');
+}
+
+function renderBoardFilters() {
+  const el = document.getElementById('board-filters');
+  if (!el) return;
+  const allTags = [...new Set(boardItems.flatMap(i => i.tags || []))].sort();
+  const allSessions = [...new Set(boardItems.map(i => i.session).filter(Boolean))].sort();
+  let html = '';
+  if (allTags.length) {
+    html += '<span class="board-filter-label">Tag:</span>';
+    allTags.forEach(t => {
+      const active = boardFilterTag === t;
+      html += '<button class="board-filter-chip' + (active ? ' active' : '') + '" onclick="toggleBoardTag(' + JSON.stringify(t) + ')">' + esc(t) + '</button>';
+    });
+  }
+  if (allSessions.length) {
+    if (allTags.length) html += '<span class="board-filter-sep">|</span>';
+    html += '<span class="board-filter-label">Session:</span>';
+    allSessions.forEach(s => {
+      const active = boardFilterSession === s;
+      html += '<button class="board-filter-chip' + (active ? ' active' : '') + '" onclick="toggleBoardSession(' + JSON.stringify(s) + ')">' + esc(s) + '</button>';
+    });
+  }
+  if (boardFilterTag || boardFilterSession) {
+    html += '<button class="board-filter-chip board-filter-clear" onclick="boardFilterTag=null;boardFilterSession=null;renderBoard()">&#x2715; Clear</button>';
+  }
+  el.innerHTML = html;
+}
+
+function toggleBoardTag(tag) {
+  boardFilterTag = boardFilterTag === tag ? null : tag;
+  renderBoard();
+}
+
+function toggleBoardSession(session) {
+  boardFilterSession = boardFilterSession === session ? null : session;
+  renderBoard();
+}
+
+function boardDragStart(e, id) {
+  _boardDragId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  setTimeout(() => {
+    const el = document.querySelector('.board-card[data-id="' + id + '"]');
+    if (el) el.classList.add('dragging');
+  }, 0);
+}
+
+function boardDragEnd() {
+  document.querySelectorAll('.board-card.dragging').forEach(el => el.classList.remove('dragging'));
+  document.querySelectorAll('.board-col.drag-over').forEach(el => el.classList.remove('drag-over'));
+}
+
+function boardColDragOver(e, col) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  document.querySelectorAll('.board-col').forEach(el => el.classList.remove('drag-over'));
+  e.currentTarget.classList.add('drag-over');
+}
+
+function boardColDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove('drag-over');
+  }
+}
+
+async function boardColDrop(e, col) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (_boardDragId) {
+    const item = boardItems.find(i => i.id === _boardDragId);
+    if (item && item.status !== col) await moveBoardItem(_boardDragId, col);
+    _boardDragId = null;
+  }
+}
+
+let _prevCardRects = {};
+
+function renderBoard() {
+  renderBoardFilters();
+  const container = document.getElementById('board-columns');
+
+  let visible = boardItems;
+  if (boardFilterTag) visible = visible.filter(i => (i.tags || []).includes(boardFilterTag));
+  if (boardFilterSession) visible = visible.filter(i => i.session === boardFilterSession);
+
+  const cols = { todo: [], doing: [], done: [] };
+  visible.forEach(item => {
+    const s = item.status || 'todo';
+    if (cols[s]) cols[s].push(item);
+  });
+  const labels = { todo: 'To Do', doing: 'In Progress', done: 'Done' };
+  const statuses = ['todo', 'doing', 'done'];
+
+  // FLIP step 1: snapshot current card positions
+  const oldRects = {};
+  const oldIds = new Set();
+  container.querySelectorAll('.board-card[data-id]').forEach(el => {
+    const id = el.dataset.id;
+    oldIds.add(id);
+    const r = el.getBoundingClientRect();
+    oldRects[id] = { top: r.top, left: r.left };
+  });
+
+  let html = '';
+  statuses.forEach(st => {
+    const dnd = 'ondragover="boardColDragOver(event,\'' + st + '\')" ondragleave="boardColDragLeave(event)" ondrop="boardColDrop(event,\'' + st + '\')"';
+    html += '<div class="board-col" ' + dnd + '>';
+    html += '<div class="board-col-header"><span>' + labels[st] + '</span>';
+    html += '<span class="col-count" data-col="' + st + '">' + cols[st].length + '</span></div>';
+    if (cols[st].length === 0) {
+      const hints = { todo: 'Nothing here yet', doing: 'Nothing in progress', done: 'Nothing done yet' };
+      html += '<div class="board-empty">' + hints[st] + '</div>';
+    }
+    cols[st].forEach(item => {
+      const tags = item.tags || [];
+      const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
+      html += '<div class="board-card" data-id="' + item.id + '" draggable="true" ondragstart="boardDragStart(event,\'' + item.id + '\')" ondragend="boardDragEnd()" onclick="openBoardDetail(\'' + item.id + '\')">';
+      if (item.key) html += '<div class="board-card-key">' + esc(item.key) + '</div>';
+      html += '<div class="board-card-title">' + esc(item.title) + '</div>';
+      if (firstLine) html += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '…' : '') + '</div>';
+      html += '<div class="board-card-footer">';
+      if (item.session) html += '<span class="board-card-session">' + esc(item.session) + '</span>';
+      tags.forEach(t => { html += '<span class="board-card-tag">' + esc(t) + '</span>'; });
+      html += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
+      html += '</div></div>';
+    });
+    if (st === 'done' && cols[st].length > 0) {
+      html += '<button class="board-add-btn" style="color:var(--red);border-color:rgba(248,81,73,0.2);" onclick="clearDone()">Clear done</button>';
+    }
+    html += '<button class="board-add-btn" onclick="openBoardAdd(\'' + st + '\')">+ Add</button>';
+    html += '</div>';
+  });
+  container.innerHTML = html;
+
+  // FLIP step 2: animate cards
+  container.querySelectorAll('.board-card[data-id]').forEach(el => {
+    const id = el.dataset.id;
+    if (!oldIds.has(id)) {
+      el.classList.add('card-enter');
+      el.addEventListener('animationend', () => el.classList.remove('card-enter'), { once: true });
+    } else if (oldRects[id]) {
+      const newR = el.getBoundingClientRect();
+      const dx = oldRects[id].left - newR.left;
+      const dy = oldRects[id].top - newR.top;
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+        el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+        el.style.transition = 'none';
+        requestAnimationFrame(() => {
+          el.classList.add('card-flip');
+          el.style.transform = '';
+          el.style.transition = '';
+          el.addEventListener('transitionend', () => el.classList.remove('card-flip'), { once: true });
+        });
+      }
+    }
+  });
+
+  // Bump column counts that changed
+  container.querySelectorAll('.col-count').forEach(el => {
+    const col = el.dataset.col;
+    const prev = _prevCardRects[col] || 0;
+    const cur = cols[col] ? cols[col].length : 0;
+    if (prev !== cur) {
+      el.classList.remove('bump');
+      void el.offsetWidth;
+      el.classList.add('bump');
+      el.addEventListener('animationend', () => el.classList.remove('bump'), { once: true });
+    }
+  });
+  statuses.forEach(st => { _prevCardRects[st] = cols[st].length; });
+}
+
+function _populateSessionSelect(selectId, current) {
+  const sel = document.getElementById(selectId);
+  if (!sel) return;
+  const names = [...new Set(sessions.map(s => s.name))].sort();
+  let html = '<option value="">— none —</option>';
+  names.forEach(n => {
+    html += '<option value="' + esc(n) + '"' + (n === current ? ' selected' : '') + '>' + esc(n) + '</option>';
+  });
+  sel.innerHTML = html;
+  if (current) sel.value = current;
+}
+
+function openBoardAdd(status) {
+  boardEditId = null;
+  boardEditStatus = status;
+  document.getElementById('be-title').value = '';
+  document.getElementById('be-desc').value = '';
+  document.getElementById('be-status').value = status;
+  _populateSessionSelect('be-session-add', '');
+  document.getElementById('board-edit-overlay').classList.add('active');
+  document.getElementById('be-title').focus();
+}
+
+function closeBoardEdit() {
+  document.getElementById('board-edit-overlay').classList.remove('active');
+  boardEditId = null;
+}
+
+async function saveBoardEdit() {
+  const title = document.getElementById('be-title').value.trim();
+  if (!title) return;
+  const desc = document.getElementById('be-desc').value.trim();
+  const status = document.getElementById('be-status').value;
+  const sel = document.getElementById('be-session-add');
+  const session = sel ? sel.value : '';
+  const sess = sessions.find(s => s.name === session);
+  const tags = sess ? (sess.tags || []) : [];
+  closeBoardEdit();
+  await addBoardItem(title, desc, status, session, tags);
+}
+
+// ── Board detail (full-screen) ──
+let boardDetailId = null;
+let boardDetailStatus = 'todo';
+
+function openBoardDetail(id) {
+  const item = boardItems.find(i => i.id === id);
+  if (!item) return;
+  boardDetailId = id;
+  boardDetailStatus = item.status || 'todo';
+  const titleEl = document.getElementById('bd-title');
+  titleEl.value = item.title;
+  titleEl.style.height = 'auto';
+  titleEl.style.height = titleEl.scrollHeight + 'px';
+  document.getElementById('bd-desc').value = item.desc || '';
+  _renderDetailStatusBtns();
+  const keyEl = document.getElementById('bd-key');
+  if (keyEl) keyEl.textContent = item.key || '';
+  _populateSessionSelect('bd-session', item.session || '');
+  boardDetailTab('edit');
+  const meta = document.getElementById('bd-meta');
+  const parts = [];
+  const tags = item.tags || [];
+  if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag">' + esc(t) + '</span>').join(' '));
+  if (item.created) parts.push('Created ' + timeAgo(item.created));
+  if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
+  meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
+  document.getElementById('bd-save-status').textContent = '';
+  document.getElementById('board-detail-overlay').classList.add('active');
+  setTimeout(() => document.getElementById('bd-title').focus(), 100);
+}
+
+function boardDetailTab(tab) {
+  const editBtn = document.getElementById('bd-tab-edit');
+  const previewBtn = document.getElementById('bd-tab-preview');
+  const desc = document.getElementById('bd-desc');
+  const preview = document.getElementById('bd-preview');
+  if (!editBtn || !previewBtn || !desc || !preview) return;
+  if (tab === 'preview') {
+    editBtn.classList.remove('active');
+    previewBtn.classList.add('active');
+    desc.style.display = 'none';
+    preview.style.display = '';
+    preview.innerHTML = renderMarkdown(desc.value);
+  } else {
+    editBtn.classList.add('active');
+    previewBtn.classList.remove('active');
+    desc.style.display = '';
+    preview.style.display = 'none';
+  }
+}
+
+function _renderDetailStatusBtns() {
+  const statuses = [{v:'todo',l:'To Do'},{v:'doing',l:'In Progress'},{v:'done',l:'Done'}];
+  document.getElementById('bd-status-row').innerHTML = statuses.map(s =>
+    '<button class="board-detail-status-btn' + (boardDetailStatus === s.v ? ' active-' + s.v : '') + '" onclick="boardDetailSetStatus(\'' + s.v + '\')">' + s.l + '</button>'
+  ).join('');
+}
+
+function boardDetailSetStatus(st) {
+  boardDetailStatus = st;
+  _renderDetailStatusBtns();
+}
+
+function closeBoardDetail() {
+  document.getElementById('board-detail-overlay').classList.remove('active');
+  boardDetailId = null;
+}
+
+async function boardDetailSave() {
+  if (!boardDetailId) return;
+  const title = document.getElementById('bd-title').value.trim();
+  if (!title) return;
+  const desc = document.getElementById('bd-desc').value.trim();
+  const sel = document.getElementById('bd-session');
+  const session = sel ? sel.value : undefined;
+  document.getElementById('bd-save-status').textContent = 'Saving...';
+  const changes = { title, desc, status: boardDetailStatus };
+  if (session !== undefined) {
+    changes.session = session;
+    const item = boardItems.find(i => i.id === boardDetailId);
+    if (item && item.session !== session) {
+      const sess = sessions.find(s => s.name === session);
+      changes.tags = sess ? (sess.tags || []) : [];
+    }
+  }
+  await updateBoardItem(boardDetailId, changes);
+  document.getElementById('bd-save-status').textContent = 'Saved';
+  setTimeout(() => {
+    const el = document.getElementById('bd-save-status');
+    if (el) el.textContent = '';
+  }, 1500);
+  const item = boardItems.find(i => i.id === boardDetailId);
+  if (item) {
+    const meta = document.getElementById('bd-meta');
+    const parts = [];
+    const tags = item.tags || [];
+    if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag">' + esc(t) + '</span>').join(' '));
+    if (item.created) parts.push('Created ' + timeAgo(item.created));
+    if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
+    if (meta) meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
+  }
+}
+
+async function boardDetailDelete() {
+  if (!boardDetailId) return;
+  closeBoardDetail();
+  await deleteBoardItem(boardDetailId);
+}
+
+function saveBoardCache() {
+  lastBoardJSON = JSON.stringify(boardItems);
+  localStorage.setItem('cmux_board_cache', lastBoardJSON);
+}
+
+async function addBoardItem(title, desc, status, session, tags) {
+  const tempId = Math.random().toString(16).slice(2, 8);
+  const now = Math.floor(Date.now() / 1000);
+  const tempItem = { id: tempId, title, desc, status, session: session || '', tags: tags || [], created: now, updated: now, _pending: true };
+  boardItems.push(tempItem);
+  saveBoardCache();
+  renderBoard();
+  const r = await apiCall(API + '/api/board', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ title, desc, status, session: session || '', tags: tags || [] })
+  });
+  if (r) {
+    const item = await r.json();
+    const idx = boardItems.findIndex(i => i.id === tempId);
+    if (idx >= 0) boardItems[idx] = item;
+    saveBoardCache();
+    renderBoard();
+  }
+}
+
+async function updateBoardItem(id, changes) {
+  const idx = boardItems.findIndex(i => i.id === id);
+  if (idx >= 0) { boardItems[idx] = { ...boardItems[idx], ...changes, updated: Math.floor(Date.now() / 1000) }; }
+  saveBoardCache();
+  renderBoard();
+  const r = await apiCall(API + '/api/board/' + id, {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(changes)
+  });
+  if (r) {
+    const updated = await r.json();
+    const idx2 = boardItems.findIndex(i => i.id === id);
+    if (idx2 >= 0) boardItems[idx2] = updated;
+    saveBoardCache();
+    renderBoard();
+  }
+}
+
+async function deleteBoardItem(id) {
+  boardItems = boardItems.filter(i => i.id !== id);
+  saveBoardCache();
+  renderBoard();
+  await apiCall(API + '/api/board/' + id, { method: 'DELETE' });
+}
+
+async function moveBoardItem(id, newStatus) {
+  await updateBoardItem(id, { status: newStatus });
+}
+
+async function clearDone() {
+  boardItems = boardItems.filter(i => i.status !== 'done');
+  saveBoardCache();
+  renderBoard();
+  await apiCall(API + '/api/board/clear-done', { method: 'POST' });
+}
+
+function openBoardGuide() {
+  document.getElementById('board-guide-overlay').classList.add('active');
+}
+function closeBoardGuide() {
+  document.getElementById('board-guide-overlay').classList.remove('active');
+}
+
 // ═══════ INIT ═══════
+// Load cached sessions immediately so offline startup renders content
+const _cachedInit = localStorage.getItem('cmux_sessions_cache');
+if (_cachedInit) {
+  try { sessions = JSON.parse(_cachedInit); } catch(e) {}
+}
+// Load cached board
+const _cachedBoard = localStorage.getItem('cmux_board_cache');
+if (_cachedBoard) {
+  try { boardItems = JSON.parse(_cachedBoard); lastBoardJSON = _cachedBoard; } catch(e) {}
+}
+if (sessions.length || drafts.length) render();
+updateConnectionStatus();
 fetchSessions();
 setInterval(fetchSessions, 5000);
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    // Store full page HTML in localStorage as fallback if iOS evicts SW cache
+    if (navigator.onLine !== false) {
+      fetch('/').then(r => r.text()).then(html => {
+        localStorage.setItem('cmux_app_html', html);
+        // Also ensure SW cache has it (in case cache was evicted but SW survived)
+        if (reg.active) reg.active.postMessage({ type: 'CACHE_HTML', html });
+      }).catch(() => {});
+    }
+  }).catch(() => {});
+}
+
+// IndexedDB for durable draft/queue storage (survives iOS cache purges)
+const _idb = (() => {
+  let db = null;
+  const open = () => new Promise((resolve, reject) => {
+    if (db) return resolve(db);
+    const req = indexedDB.open('cmux', 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+    };
+    req.onsuccess = () => { db = req.result; resolve(db); };
+    req.onerror = () => reject(req.error);
+  });
+  return {
+    set: (key, val) => open().then(d => {
+      const tx = d.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(val, key);
+    }).catch(() => {}),
+    get: (key) => open().then(d => new Promise((resolve) => {
+      const tx = d.transaction('kv', 'readonly');
+      const req = tx.objectStore('kv').get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    })).catch(() => null),
+  };
+})();
+
+// Dual-write drafts and queue to both localStorage and IndexedDB
+function persistOfflineData() {
+  localStorage.setItem('cmux_drafts', JSON.stringify(drafts));
+  saveQueue();
+  _idb.set('drafts', drafts);
+  _idb.set('offline_queue', offlineQueue);
+}
+
+// On startup, restore from IndexedDB if localStorage is empty (iOS purge recovery)
+_idb.get('drafts').then(val => {
+  if (val && !drafts.length && val.length) {
+    drafts = val;
+    saveDrafts();
+    render();
+  }
+});
+_idb.get('offline_queue').then(val => {
+  if (val && !offlineQueue.length && val.length) {
+    offlineQueue = val;
+    saveQueue();
+    updateConnectionStatus();
+  }
+});
+
+function fmtTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function openAbout() {
+  document.getElementById('about-overlay').classList.add('active');
+  const el = document.getElementById('daily-stats');
+  el.innerHTML = '<div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading...</div>';
+  fetch(API + '/api/stats/daily').then(r => r.json()).then(data => {
+    let html = '<div style="font-size:0.8rem;font-weight:600;margin-bottom:8px;">Today\'s Tokens</div>';
+    html += '<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:6px;">';
+    html += '<span>cmux sessions</span><span style="font-weight:600;">' + fmtTokens(data.cmux_tokens) + '</span></div>';
+    html += '<div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border);">';
+    html += '<span>All Claude Code</span><span style="font-weight:600;">' + fmtTokens(data.total_tokens) + '</span></div>';
+    if (data.sessions && data.sessions.length) {
+      html += '<div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">Breakdown</div>';
+      data.sessions.forEach(s => {
+        const bar = s.total / data.total_tokens * 100;
+        html += '<div style="margin-bottom:4px;">';
+        html += '<div style="display:flex;justify-content:space-between;font-size:0.75rem;">';
+        html += '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;">' + (s.cmux ? '' : '<span style=color:var(--dim)>') + esc(s.name) + (s.cmux ? '' : '</span>') + '</span>';
+        html += '<span style="flex-shrink:0;margin-left:8px;">' + fmtTokens(s.total) + '</span></div>';
+        html += '<div style="height:3px;border-radius:2px;background:var(--border);margin-top:2px;">';
+        html += '<div style="height:100%;border-radius:2px;background:' + (s.cmux ? 'var(--accent)' : 'var(--dim)') + ';width:' + bar.toFixed(1) + '%;"></div></div></div>';
+      });
+    } else {
+      html += '<div style="color:var(--dim);font-size:0.75rem;text-align:center;">No usage today</div>';
+    }
+    html += '<div style="text-align:center;margin-top:10px;"><button class="btn" style="font-size:0.7rem;padding:3px 10px;" onclick="resetTokenStats()">Reset counters</button></div>';
+    el.innerHTML = html;
+  }).catch(() => {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.75rem;text-align:center;">Offline — stats unavailable</div>';
+  });
+}
+
+function resetTokenStats() {
+  if (!confirm('Reset token counters to zero?')) return;
+  fetch(API + '/api/stats/reset', { method: 'POST' }).then(r => r.json()).then(() => {
+    openAbout();
+  }).catch(() => showToast('Reset failed'));
+}
+
+function forceUpdate() {
+  const el = document.getElementById('update-status');
+  el.textContent = 'Updating...';
+  if (!('serviceWorker' in navigator)) {
+    location.reload(true);
+    return;
+  }
+  navigator.serviceWorker.getRegistration().then(reg => {
+    if (!reg) { location.reload(true); return; }
+    reg.update().then(() => {
+      if (reg.waiting) {
+        reg.waiting.postMessage({type: 'SKIP_WAITING'});
+      }
+      caches.keys().then(keys => Promise.all(keys.map(k => caches.delete(k)))).then(() => {
+        el.textContent = 'Cache cleared, reloading...';
+        setTimeout(() => location.reload(true), 300);
+      });
+    }).catch(() => {
+      el.textContent = 'Update failed, reloading...';
+      setTimeout(() => location.reload(true), 300);
+    });
+  });
 }
 </script>
 </body>
@@ -2568,9 +4252,9 @@ PWA_MANIFEST = json.dumps({
     ],
 })
 
-# Minimal service worker: cache the app shell so it loads offline
+# Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'cmux-v2';
+const CACHE = 'cmux-v0.5.0';
 const SHELL_URLS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -2590,6 +4274,19 @@ self.addEventListener('activate', e => {
   );
 });
 
+self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
+  // Client can push HTML into SW for localStorage-backed fallback
+  if (e.data && e.data.type === 'CACHE_HTML') {
+    caches.open(CACHE).then(cache => {
+      const resp = new Response(e.data.html, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      });
+      cache.put('/', resp);
+    });
+  }
+});
+
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
@@ -2597,16 +4294,21 @@ self.addEventListener('fetch', e => {
   // API requests: network only (app JS handles offline queue)
   if (url.pathname.startsWith('/api/')) return;
 
-  // App shell (/, manifest, icons): stale-while-revalidate
-  // Serve from cache immediately, fetch update in background
+  // Cache-first: serve from cache instantly, refresh in background
   e.respondWith(
     caches.open(CACHE).then(cache =>
       cache.match(e.request).then(cached => {
-        const fetchPromise = fetch(e.request).then(response => {
+        // Always try to refresh cache in background when online
+        const networkUpdate = fetch(e.request).then(response => {
           if (response.ok) cache.put(e.request, response.clone());
           return response;
-        }).catch(() => cached);  // network fail → use cached
-        return cached || fetchPromise;  // cache hit → instant, miss → wait for network
+        }).catch(() => null);
+
+        if (cached) return cached;
+        // Cache miss — wait for network
+        return networkUpdate.then(r => r || new Response('Offline — please reload when connected', {
+          status: 503, headers: { 'Content-Type': 'text/plain' }
+        }));
       })
     )
   );
@@ -2722,6 +4424,27 @@ class CCHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/sessions":
             return self._json(list_sessions())
 
+        # GET /api/stats/daily
+        if method == "GET" and path == "/api/stats/daily":
+            return self._json(get_daily_token_stats())
+
+        # POST /api/stats/reset
+        if method == "POST" and path == "/api/stats/reset":
+            # Save current raw totals as baseline (before subtraction)
+            raw_stats = get_daily_token_stats()
+            # Need raw totals (add back any existing baseline)
+            baseline = _load_token_baseline()
+            if baseline:
+                raw_stats["total_input"] += baseline.get("total_input", 0)
+                raw_stats["total_output"] += baseline.get("total_output", 0)
+                bl_sessions = baseline.get("sessions", {})
+                for s in raw_stats["sessions"]:
+                    bl = bl_sessions.get(s["proj_dir"], bl_sessions.get(s["name"], {}))
+                    s["input"] += bl.get("input", 0)
+                    s["output"] += bl.get("output", 0)
+            save_token_baseline(raw_stats)
+            return self._json({"ok": True})
+
         # GET /api/file?path=...&cwd=...
         if method == "GET" and path == "/api/file":
             fpath = qs.get("path", [""])[0]
@@ -2772,6 +4495,80 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json(results)
             except PermissionError:
                 return self._json([])
+
+        # ── Board API ──
+        if path == "/api/board" or path.startswith("/api/board/"):
+            if method == "GET" and path == "/api/board":
+                return self._json(_load_board())
+
+            if method == "POST" and path == "/api/board":
+                body = self._read_body()
+                title = body.get("title", "").strip()
+                if not title:
+                    return self._json({"error": "missing title"}, 400)
+                raw = {}
+                if _BOARD_FILE.exists():
+                    try:
+                        raw = json.loads(_BOARD_FILE.read_text())
+                    except Exception:
+                        pass
+                items = raw.get("items", [])
+                counters = raw.get("counters", {})
+                session = body.get("session", "").strip()
+                # Build issue key from session name initials (e.g. "my-project" → "MP", "infra" → "INFRA")
+                words = [w for w in re.split(r'[-_\s]+', session) if w] if session else []
+                if not words:
+                    prefix = "CMUX"
+                elif len(words) == 1:
+                    prefix = re.sub(r'[^A-Z0-9]', '', words[0].upper())[:5] or "CMUX"
+                else:
+                    prefix = re.sub(r'[^A-Z0-9]', '', ''.join(w[0] for w in words).upper())[:5] or "CMUX"
+                n = counters.get(prefix, 0) + 1
+                counters[prefix] = n
+                item = {
+                    "id": os.urandom(3).hex(),
+                    "key": f"{prefix}-{n}",
+                    "title": title,
+                    "desc": body.get("desc", "").strip(),
+                    "status": body.get("status", "todo"),
+                    "session": session,
+                    "tags": body.get("tags", []),
+                    "created": int(time.time()),
+                    "updated": int(time.time()),
+                }
+                items.append(item)
+                _BOARD_FILE.write_text(json.dumps({"items": items, "counters": counters}))
+                return self._json(item, 201)
+
+            if method == "POST" and path == "/api/board/clear-done":
+                items = [i for i in _load_board() if i.get("status") != "done"]
+                _save_board(items)
+                return self._json({"ok": True, "remaining": len(items)})
+
+            # PATCH/DELETE /api/board/<id>
+            board_m = re.match(r"^/api/board/([a-f0-9]+)$", path)
+            if board_m:
+                bid = board_m.group(1)
+                items = _load_board()
+                idx = next((i for i, it in enumerate(items) if it["id"] == bid), None)
+                if idx is None:
+                    return self._json({"error": "item not found"}, 404)
+
+                if method == "PATCH":
+                    body = self._read_body()
+                    for k in ("title", "desc", "status", "session", "tags"):
+                        if k in body:
+                            items[idx][k] = body[k]
+                    items[idx]["updated"] = int(time.time())
+                    _save_board(items)
+                    return self._json(items[idx])
+
+                if method == "DELETE":
+                    removed = items.pop(idx)
+                    _save_board(items)
+                    return self._json({"ok": True, "deleted": removed["id"]})
+
+            return self._json({"error": "not found"}, 404)
 
         # GET /api/tmux-sessions (unregistered tmux sessions)
         if method == "GET" and path == "/api/tmux-sessions":
@@ -2854,7 +4651,15 @@ class CCHandler(BaseHTTPRequestHandler):
             if action == "peek":
                 lines = int(qs.get("lines", ["80"])[0])
                 output = tmux_capture(name, lines)
-                return self._json({"name": name, "output": output})
+                if output:
+                    # Also save snapshot while we have it
+                    threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
+                    return self._json({"name": name, "output": output})
+                # Not running or empty — serve saved log
+                saved = load_session_log(name)
+                if saved:
+                    return self._json({"name": name, "output": saved, "saved": True})
+                return self._json({"name": name, "output": "(no output)"})
             if action == "info":
                 info = get_session_info(name)
                 return self._json(info)
@@ -3007,6 +4812,15 @@ class CCHandler(BaseHTTPRequestHandler):
                         flags = f"--model {model_val} {flags}".strip()
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
+                    # Also send /model to running session so it takes effect immediately
+                    if is_running(name) and model_val:
+                        try:
+                            subprocess.run(
+                                ["tmux", "send-keys", "-t", tmux_name(name), f"/model {model_val}", "Enter"],
+                                capture_output=True, timeout=5,
+                            )
+                        except Exception:
+                            pass
                     return self._json({"ok": True, "message": f"model set to {model_val}"})
 
                 # Toggle YOLO
@@ -3052,11 +4866,17 @@ class CCHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._route("GET")
 
+    def do_HEAD(self):
+        self._route("GET")
+
     def do_POST(self):
         self._route("POST")
 
     def do_PATCH(self):
         self._route("PATCH")
+
+    def do_DELETE(self):
+        self._route("DELETE")
 
 
 # ═══════════════════════════════════════════
@@ -3193,6 +5013,12 @@ def main():
     # Start file watcher thread
     watcher = threading.Thread(target=_watch_self, args=(server,), daemon=True)
     watcher.start()
+
+    # Start session log snapshot thread
+    snapshotter = threading.Thread(target=_snapshot_loop, daemon=True)
+    snapshotter.start()
+    # Initial snapshot immediately
+    threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
 
     try:
         server.serve_forever()
