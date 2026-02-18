@@ -2263,7 +2263,7 @@ function render() {
     const isYolo = flags.includes('--dangerously-skip-permissions');
     const modelMatch = flags.match(/--model\s+(\S+)/);
     const flagModel = modelMatch ? modelMatch[1] : null;
-    const model = s.active_model || flagModel || null;
+    const model = flagModel || s.active_model || null;
     const shortModel = model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
     return `
     <div class="card ${isExp ? 'expanded' : ''}" onclick="toggle('${s.name}')">
