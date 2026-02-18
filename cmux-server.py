@@ -1725,11 +1725,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span id="conn-status" class="conn-status online" onclick="showQueueModal()"></span>
   </div>
   <div style="display:flex;gap:8px;align-items:center;flex:1;min-width:0;">
-    <div class="search-wrap" id="search-wrap">
-      <input class="search-input" id="search-input" type="text" placeholder="Search..." autocomplete="off" autocorrect="off"
-        oninput="searchQuery=this.value;document.getElementById('search-wrap').classList.toggle('has-value',!!this.value);render()">
-      <button class="search-clear" onclick="event.stopPropagation();clearSearch()">&#x2715;</button>
-    </div>
     <div class="active-wrap">
       <button class="btn-active" id="active-btn" onclick="event.stopPropagation();toggleActiveDropdown()">
         <span class="active-dot"></span>
@@ -1751,6 +1746,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-board" onclick="switchView('board')">Board</button>
 </div>
 <div id="session-view">
+<div style="padding:0 12px;margin-top:8px;">
+  <div class="search-wrap" id="search-wrap">
+    <input class="search-input" id="search-input" type="text" placeholder="Search sessions..." autocomplete="off" autocorrect="off"
+      oninput="searchQuery=this.value;document.getElementById('search-wrap').classList.toggle('has-value',!!this.value);render()">
+    <button class="search-clear" onclick="event.stopPropagation();clearSearch()">&#x2715;</button>
+  </div>
+</div>
 <div id="tag-filters" class="tag-filters"></div>
 <div id="offline-banner" class="offline-banner">
   <div class="offline-banner-header">
