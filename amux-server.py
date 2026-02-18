@@ -5869,8 +5869,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 ok, msg = send_keys(name, keys)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "start":
-                ok, msg = start_session(name)
-                return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+                cfg = parse_env_file(CC_SESSIONS / f"{name}.env") if (CC_SESSIONS / f"{name}.env").exists() else {}
+                work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                session_id = _find_latest_session_id(work_dir)
+                extra = f"--resume {session_id}" if session_id else ""
+                ok, msg = start_session(name, extra)
+                return self._json({"ok": ok, "message": msg, "resumed": bool(session_id)}, 200 if ok else 500)
             if action == "stop":
                 ok, msg = stop_session(name)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
