@@ -2089,11 +2089,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
-<!-- File preview overlay -->
-<div id="file-overlay" class="file-overlay">
+<!-- File preview overlay (z-index 300 so it stacks above explorer at 250) -->
+<div id="file-overlay" class="file-overlay" style="z-index:300;">
   <div class="file-overlay-header">
     <h2 id="file-title">file</h2>
-    <button class="btn" onclick="closeFilePreview()">Close</button>
+    <button class="btn" onclick="closeFilePreview()">&#x2715;</button>
   </div>
   <div id="file-body" class="file-overlay-body"></div>
 </div>
@@ -2103,7 +2103,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="file-overlay-header">
     <div class="explore-breadcrumb" id="explore-breadcrumb" style="flex:1;margin-right:8px;"></div>
     <button class="btn" id="explore-hidden-btn" onclick="toggleExploreHidden()" style="font-size:0.7rem;padding:2px 8px;" title="Show hidden files">.*</button>
-    <button class="btn" onclick="closeExplore()">Close</button>
+    <button class="btn" onclick="closeExplore()">&#x2715;</button>
   </div>
   <div id="explore-body" class="file-overlay-body" style="padding:0;overflow-y:auto;"></div>
 </div>
@@ -3718,6 +3718,66 @@ async function loadExplore(path) {
     body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
   }
 }
+
+// Swipe right to close file preview
+(function() {
+  const el = document.getElementById('file-overlay');
+  let sx = 0, sy = 0, tracking = false;
+  el.addEventListener('touchstart', e => {
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; tracking = true;
+    el.style.transition = 'none';
+  }, {passive: true});
+  el.addEventListener('touchmove', e => {
+    if (!tracking) return;
+    const dx = e.touches[0].clientX - sx;
+    const dy = Math.abs(e.touches[0].clientY - sy);
+    if (dy > 30 && dx < 30) { tracking = false; el.style.transform = ''; el.style.transition = ''; return; }
+    if (dx > 10) el.style.transform = 'translateX(' + dx + 'px)';
+  }, {passive: true});
+  el.addEventListener('touchend', e => {
+    if (!tracking) { el.style.transition = ''; return; }
+    tracking = false;
+    const dx = e.changedTouches[0].clientX - sx;
+    el.style.transition = 'transform 0.25s cubic-bezier(.4,0,.2,1)';
+    if (dx > 80) {
+      el.style.transform = 'translateX(100%)';
+      setTimeout(() => { closeFilePreview(); el.style.transform = ''; el.style.transition = ''; }, 260);
+    } else {
+      el.style.transform = '';
+      setTimeout(() => { el.style.transition = ''; }, 260);
+    }
+  });
+})();
+
+// Swipe right to close explorer
+(function() {
+  const el = document.getElementById('explore-overlay');
+  let sx = 0, sy = 0, tracking = false;
+  el.addEventListener('touchstart', e => {
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; tracking = true;
+    el.style.transition = 'none';
+  }, {passive: true});
+  el.addEventListener('touchmove', e => {
+    if (!tracking) return;
+    const dx = e.touches[0].clientX - sx;
+    const dy = Math.abs(e.touches[0].clientY - sy);
+    if (dy > 30 && dx < 30) { tracking = false; el.style.transform = ''; el.style.transition = ''; return; }
+    if (dx > 10) el.style.transform = 'translateX(' + dx + 'px)';
+  }, {passive: true});
+  el.addEventListener('touchend', e => {
+    if (!tracking) { el.style.transition = ''; return; }
+    tracking = false;
+    const dx = e.changedTouches[0].clientX - sx;
+    el.style.transition = 'transform 0.25s cubic-bezier(.4,0,.2,1)';
+    if (dx > 80) {
+      el.style.transform = 'translateX(100%)';
+      setTimeout(() => { closeExplore(); el.style.transform = ''; el.style.transition = ''; }, 260);
+    } else {
+      el.style.transform = '';
+      setTimeout(() => { el.style.transition = ''; }, 260);
+    }
+  });
+})();
 
 function renderMarkdown(md) {
   // Lightweight markdown renderer — handles common elements
