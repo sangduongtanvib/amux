@@ -6786,6 +6786,39 @@ class CCHandler(BaseHTTPRequestHandler):
                             capture_output=True, timeout=5,
                         )
                     env_file.rename(new_file)
+                    # Migrate memory file
+                    old_mem = CC_MEMORY / f"{name}.md"
+                    new_mem = CC_MEMORY / f"{new_name}.md"
+                    if old_mem.exists() and not new_mem.exists():
+                        old_mem.rename(new_mem)
+                    # Repair Claude symlink to point at new memory file
+                    work_dir = cfg.get("CC_DIR", "")
+                    if work_dir:
+                        pname = _project_name(work_dir)
+                        claude_link = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
+                        try:
+                            if claude_link.is_symlink():
+                                claude_link.unlink()
+                            claude_link.symlink_to(new_mem)
+                        except Exception:
+                            pass
+                    # Migrate log file
+                    old_log = CC_LOGS / f"{name}.log"
+                    new_log = CC_LOGS / f"{new_name}.log"
+                    if old_log.exists() and not new_log.exists():
+                        old_log.rename(new_log)
+                    # Update board items referencing old session name
+                    try:
+                        board_items = _load_board()
+                        changed = False
+                        for item in board_items:
+                            if item.get("session") == name:
+                                item["session"] = new_name
+                                changed = True
+                        if changed:
+                            _save_board(board_items)
+                    except Exception:
+                        pass
                     return self._json({"ok": True, "message": f"renamed to {new_name}"})
 
                 # Change model
