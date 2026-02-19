@@ -49,6 +49,21 @@ UPLOAD_ALLOWED_EXTS = {
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
+SERVER_LOG = CC_LOGS / "server.log"
+_server_log_lock = threading.Lock()
+
+def slog(*args):
+    """Append a timestamped line to ~/.amux/logs/server.log and stderr."""
+    import datetime
+    msg = " ".join(str(a) for a in args)
+    line = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
+    sys.stderr.write(line)
+    try:
+        with _server_log_lock:
+            with open(SERVER_LOG, "a") as f:
+                f.write(line)
+    except Exception:
+        pass
 
 # SSE shared cache — avoids redundant subprocess calls when multiple tabs connect
 _sse_cache = {
@@ -1653,6 +1668,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .toast.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
+  /* Confirm / alert modal — replaces native confirm()/alert() which PWA blocks */
+  .modal-backdrop {
+    display: none; position: fixed; inset: 0; z-index: 600;
+    background: rgba(0,0,0,0.6); align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 24px 20px 16px; max-width: 320px; width: 90%; text-align: center;
+  }
+  .modal-msg { font-size: 0.95rem; color: var(--text); margin-bottom: 20px; line-height: 1.5; }
+  .modal-btns { display: flex; gap: 10px; justify-content: center; }
+  .modal-btns .btn { min-width: 80px; }
+
   /* Connection status indicator — pill button */
   .conn-status {
     display: inline-flex; align-items: center; gap: 6px;
@@ -2376,6 +2405,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- Toast -->
 <div id="toast" class="toast"></div>
 
+<!-- Confirm / alert modal -->
+<div id="modal-backdrop" class="modal-backdrop" onclick="_modalBgClick(event)">
+  <div class="modal-box">
+    <div id="modal-msg" class="modal-msg"></div>
+    <div class="modal-btns" id="modal-btns"></div>
+  </div>
+</div>
+
 <!-- File preview overlay (z-index 300 so it stacks above explorer at 250) -->
 <div id="file-overlay" class="file-overlay" style="z-index:300;">
   <div class="file-overlay-header">
@@ -2506,6 +2543,34 @@ function showToast(msg) {
   el.classList.add('visible');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('visible'), 3000);
+}
+
+// Modal: replaces confirm() / alert() — both blocked in PWA standalone mode
+let _modalResolve = null;
+function _modalBgClick(e) { if (e.target === document.getElementById('modal-backdrop')) _modalClose(false); }
+function _modalClose(val) {
+  document.getElementById('modal-backdrop').classList.remove('open');
+  if (_modalResolve) { _modalResolve(val); _modalResolve = null; }
+}
+function showConfirm(msg, confirmLabel = 'Confirm', danger = false) {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    document.getElementById('modal-msg').textContent = msg;
+    const btns = document.getElementById('modal-btns');
+    btns.innerHTML = `
+      <button class="btn ${danger ? 'danger' : 'primary'}" onclick="_modalClose(true)">${confirmLabel}</button>
+      <button class="btn" onclick="_modalClose(false)">Cancel</button>`;
+    document.getElementById('modal-backdrop').classList.add('open');
+  });
+}
+function showAlert(msg) {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    document.getElementById('modal-msg').textContent = msg;
+    const btns = document.getElementById('modal-btns');
+    btns.innerHTML = `<button class="btn primary" onclick="_modalClose(true)">OK</button>`;
+    document.getElementById('modal-backdrop').classList.add('open');
+  });
 }
 
 // Describe a queued operation in human-readable form
@@ -3471,7 +3536,7 @@ function cloneSession(session) {
 
 async function deleteSession(session) {
   closeAllMenus();
-  if (!confirm('Delete session "' + session + '"?')) return;
+  if (!await showConfirm('Delete session "' + session + '"?', 'Delete', true)) return;
   await apiCall(API + '/api/sessions/' + session + '/delete', { method: 'POST' });
   expanded.delete(session);
   await fetchSessions();
@@ -3481,7 +3546,7 @@ async function doStart(name) {
   const r = await apiCall(API + '/api/sessions/' + name + '/start', { method: 'POST' });
   if (!r) return;
   const data = await r.json();
-  if (!data.ok) { alert('Failed to start: ' + (data.message || data.error || 'unknown error')); return; }
+  if (!data.ok) { await showAlert('Failed to start: ' + (data.message || data.error || 'unknown error')); return; }
   // Poll until session shows as running (up to 5s)
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
@@ -5668,7 +5733,7 @@ function openAbout() {
 }
 
 function resetTokenStats() {
-  if (!confirm('Reset token counters to zero?')) return;
+  if (!await showConfirm('Reset token counters to zero?', 'Reset', true)) return;
   fetch(API + '/api/stats/reset', { method: 'POST' }).then(r => r.json()).then(() => {
     openAbout();
   }).catch(() => showToast('Reset failed'));
@@ -6166,9 +6231,8 @@ _icon_cache = {}
 
 class CCHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        # Log client IP + request so we can distinguish phone vs desktop
         ip = self.client_address[0]
-        sys.stderr.write(f"  [{ip}] {args[0]}\n")
+        slog(f"[{ip}] {args[0]}")
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -6266,6 +6330,14 @@ class CCHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
+        try:
+            return self._route_inner(method, path, qs)
+        except Exception as e:
+            import traceback
+            slog(f"ERROR {method} {path} — {e}\n{traceback.format_exc()}")
+            return self._json({"error": str(e)}, 500)
+
+    def _route_inner(self, method: str, path: str, qs: dict):
 
         # GET /
         if method == "GET" and path == "/":
