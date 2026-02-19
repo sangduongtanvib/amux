@@ -374,6 +374,30 @@ if _legacy_board.exists() and not _BOARD_FILE.exists():
     _shutil.move(str(_legacy_board), str(_BOARD_FILE))
 
 
+def _meta_path(name: str) -> Path:
+    return CC_SESSIONS / f"{name}.meta.json"
+
+
+def _load_meta(name: str) -> dict:
+    p = _meta_path(name)
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_meta(name: str, meta: dict):
+    _meta_path(name).write_text(json.dumps(meta))
+
+
+def _update_meta(name: str, **kwargs):
+    meta = _load_meta(name)
+    meta.update(kwargs)
+    _save_meta(name, meta)
+
+
 _DEFAULT_STATUSES = [
     {"id": "todo", "label": "To Do"},
     {"id": "doing", "label": "In Progress"},
@@ -870,6 +894,18 @@ def _migrate_memory_files():
 
 _migrate_memory_files()
 
+# Backfill meta files for existing sessions that predate the metadata feature
+if CC_SESSIONS.is_dir():
+    for _env_f in CC_SESSIONS.glob("*.env"):
+        _n = _env_f.stem
+        if not _meta_path(_n).exists():
+            _cfg = parse_env_file(_env_f)
+            _save_meta(_n, {
+                "created_at": int(_env_f.stat().st_mtime),
+                "creator": _cfg.get("CC_CREATOR", ""),
+                "start_count": 0,
+            })
+
 
 def _compose_memory(global_content: str, session_content: str) -> str:
     """Compose global + session memory into a single MEMORY.md for Claude."""
@@ -1002,6 +1038,10 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
             ["tmux", "rename-window", "-t", tmux_sess, name],
             capture_output=True, timeout=5,
         )
+        meta = _load_meta(name)
+        meta["last_started"] = int(time.time())
+        meta["start_count"] = meta.get("start_count", 0) + 1
+        _save_meta(name, meta)
         return True, "started"
     except subprocess.CalledProcessError as e:
         return False, e.stderr.decode(errors="replace")
@@ -1739,7 +1779,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .modal-backdrop.open { display: flex; }
   .modal-box {
     background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    padding: 24px 20px 16px; max-width: 320px; width: 90%; text-align: center;
+    padding: 24px 20px 16px; max-width: min(480px, 94vw); width: 100%; text-align: center;
   }
   .modal-msg { font-size: 0.95rem; color: var(--text); margin-bottom: 20px; line-height: 1.5; }
   .modal-btns { display: flex; gap: 10px; justify-content: center; }
@@ -2661,6 +2701,31 @@ function showAlert(msg) {
   });
 }
 
+async function showSessionInfo(name) {
+  const r = await fetch(API + '/api/sessions/' + name + '/meta');
+  const m = await r.json();
+  const ts = t => t ? new Date(t * 1000).toLocaleString() : '—';
+  const row = (label, val) => val ? `<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:0.85rem;"><span style="color:var(--dim);min-width:110px;flex-shrink:0;">${label}</span><span style="word-break:break-all;">${val}</span></div>` : '';
+  const html = `<div style="text-align:left;">
+    <div style="font-size:1.05rem;font-weight:700;margin-bottom:12px;">${esc(name)}</div>
+    ${row('Created', ts(m.created_at))}
+    ${row('Creator', m.creator)}
+    ${row('Last started', ts(m.last_started))}
+    ${row('Start count', m.start_count !== undefined ? m.start_count : '—')}
+    ${row('Env updated', ts(m.env_updated))}
+    ${row('Directory', m.dir)}
+    ${row('Model / flags', m.flags || '(default sonnet)')}
+    ${m.desc ? row('Description', m.desc) : ''}
+    ${m.tags && m.tags.length ? row('Tags', m.tags.join(', ')) : ''}
+    ${row('Memory size', m.mem_size ? m.mem_size + ' bytes' : '(empty)')}
+    ${row('Memory path', m.mem_path)}
+  </div>`;
+  _modalResolve = null;
+  document.getElementById('modal-msg').innerHTML = html;
+  document.getElementById('modal-btns').innerHTML = '<button class="btn primary" onclick="_modalClose(true)">Close</button>';
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+
 // Describe a queued operation in human-readable form
 function describeOp(item) {
   const url = item.url || '';
@@ -3065,6 +3130,7 @@ function render() {
         <button class="card-menu-btn" onclick="event.stopPropagation();toggleMenu('${s.name}')" title="Options">&#x22EF;</button>
         <div class="card-menu" id="menu-${s.name}">
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openPeek('${s.name}')"><span class="mi">&#x1F4BB;</span> Peek terminal</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
           ${s.running ? `<div class="card-menu-item danger" onclick="event.stopPropagation();doStop('${s.name}')"><span class="mi">&#x23F9;</span> Stop</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
@@ -7040,6 +7106,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 cfg["CC_CREATOR"] = creator
             cfg["CC_FLAGS"] = ""
             _write_env(env_file, cfg)
+            _save_meta(name, {
+                "created_at": int(time.time()),
+                "creator": creator,
+                "start_count": 0,
+            })
             if dir_path:
                 _ensure_memory(name, dir_path)
             return self._json({"ok": True, "message": f"created {name}"})
@@ -7073,6 +7144,25 @@ class CCHandler(BaseHTTPRequestHandler):
             if action == "info":
                 info = get_session_info(name)
                 return self._json(info)
+            if action == "meta":
+                cfg = parse_env_file(env_file)
+                meta = _load_meta(name)
+                # Merge static env fields for a complete picture
+                meta.setdefault("creator", cfg.get("CC_CREATOR", ""))
+                env_mtime = int(env_file.stat().st_mtime)
+                mem_file = _session_mem_file(name)
+                mem_size = mem_file.stat().st_size if mem_file.exists() else 0
+                return self._json({
+                    **meta,
+                    "name": name,
+                    "dir": cfg.get("CC_DIR", ""),
+                    "flags": cfg.get("CC_FLAGS", ""),
+                    "desc": cfg.get("CC_DESC", ""),
+                    "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
+                    "env_updated": env_mtime,
+                    "mem_size": mem_size,
+                    "mem_path": str(_session_mem_file(name)),
+                })
             if action == "stats":
                 cfg = parse_env_file(env_file)
                 stats = get_claude_stats(cfg.get("CC_DIR", ""))
@@ -7250,6 +7340,11 @@ class CCHandler(BaseHTTPRequestHandler):
                             claude_link.symlink_to(new_mem)
                         except Exception:
                             pass
+                    # Migrate meta file
+                    old_meta = _meta_path(name)
+                    new_meta = _meta_path(new_name)
+                    if old_meta.exists() and not new_meta.exists():
+                        old_meta.rename(new_meta)
                     # Migrate log file
                     old_log = CC_LOGS / f"{name}.log"
                     new_log = CC_LOGS / f"{new_name}.log"
