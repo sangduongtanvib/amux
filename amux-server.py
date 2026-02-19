@@ -796,18 +796,6 @@ def _ensure_memory(name: str, work_dir: str):
     mem_file = CC_MEMORY / f"{name}.md"
     pname = _project_name(work_dir)
 
-    # Migrate: if old project-keyed file exists and per-session file is empty/missing, absorb it
-    old_project_mem = CC_MEMORY / f"{pname}.md"
-    if old_project_mem.exists() and old_project_mem.resolve() != mem_file.resolve():
-        old_content = old_project_mem.read_text(errors="replace").strip()
-        if old_content:
-            current = mem_file.read_text(errors="replace").strip() if mem_file.exists() else ""
-            if not current:
-                mem_file.write_text(old_content + "\n")
-            elif old_content not in current:
-                mem_file.write_text((current + "\n\n" + old_content).strip() + "\n")
-        # Keep the old project file — other sessions may still reference it
-
     if not mem_file.exists():
         mem_file.write_text("")
 
