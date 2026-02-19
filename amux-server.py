@@ -5508,6 +5508,7 @@ function openBoardDetail(id) {
   meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
   document.getElementById('bd-save-status').textContent = '';
   document.getElementById('board-detail-overlay').classList.add('active');
+  document.body.style.overflow = 'hidden';
   setTimeout(() => document.getElementById('bd-title').focus(), 100);
 }
 
@@ -5564,6 +5565,7 @@ function closeBoardDetail() {
     }
   }
   document.getElementById('board-detail-overlay').classList.remove('active');
+  document.body.style.overflow = '';
   boardDetailId = null;
 }
 
