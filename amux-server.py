@@ -1888,6 +1888,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tab-bar {
     display: flex; gap: 0; margin: 0 -16px 12px -16px; padding: 0 16px;
     border-bottom: 1px solid var(--border);
+    position: sticky; top: 60px; z-index: 39; background: var(--bg);
   }
   .tab-bar button {
     flex: 1; padding: 10px 0; font-size: 0.85rem; font-weight: 600;
@@ -1906,7 +1907,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-search-wrap .search-clear { display: none; }
   .board-search-wrap:has(.search-input:not(:placeholder-shown)) .search-clear { display: flex; }
   .board-columns {
-    display: flex; gap: 12px; overflow-x: auto;
+    display: flex; gap: 12px; overflow-x: scroll;
     -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
     min-height: 200px;
   }
@@ -5780,6 +5781,15 @@ if (_cachedBoard) {
 }
 if (sessions.length || drafts.length) render();
 updateConnectionStatus();
+(function() {
+  function _syncTabTop() {
+    const h = document.querySelector('.header-row');
+    const t = document.querySelector('.tab-bar');
+    if (h && t) t.style.top = h.offsetHeight + 'px';
+  }
+  _syncTabTop();
+  window.addEventListener('resize', _syncTabTop);
+})();
 
 // ═══════ SSE — real-time push updates ═══════
 let _sse = null;
