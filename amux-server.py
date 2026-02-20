@@ -2280,7 +2280,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     flex: 1; min-width: 200px; max-width: 320px;
     display: flex; flex-direction: column; gap: 6px;
     background: rgba(255,255,255,0.02); border-radius: 10px; padding: 10px 8px;
-    min-height: 80px;
+    min-height: 80px; touch-action: pan-x;
   }
   .board-col-header {
     font-size: 0.72rem; font-weight: 600; color: var(--dim);
@@ -4428,7 +4428,6 @@ function openPeek(name) {
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   updateConnectionStatus();
   document.getElementById('peek-overlay').classList.add('active');
-  document.body.style.overflow = 'hidden';
   // Load cached peek instantly while fetching fresh data
   _idb.get('peek_' + name).then(cached => {
     if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
@@ -4469,7 +4468,6 @@ function closePeek() {
   lastPeekHTML = '';
   clearPeekFiles();
   document.getElementById('peek-overlay').classList.remove('active');
-  document.body.style.overflow = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
 }
 
@@ -4479,6 +4477,7 @@ function closePeek() {
   const body = document.getElementById('peek-body');
   let sx = 0, sy = 0, tracking = false;
   el.addEventListener('touchstart', e => {
+    if (!el.classList.contains('active')) return;
     // Let the terminal body handle its own touches (scrolling + text selection)
     if (body && body.contains(e.target)) { tracking = false; return; }
     const t = e.touches[0];
@@ -4486,7 +4485,7 @@ function closePeek() {
     el.style.transition = 'none';
   }, {passive: true});
   el.addEventListener('touchmove', e => {
-    if (!tracking) return;
+    if (!tracking || !el.classList.contains('active')) return;
     const dx = e.touches[0].clientX - sx;
     const dy = Math.abs(e.touches[0].clientY - sy);
     if (dy > 30 && dx < 30) { tracking = false; el.style.transform = ''; el.style.transition = ''; return; }
@@ -5118,12 +5117,10 @@ let _exploreShowHidden = false;
 function openExplore(startPath) {
   _explorePath = startPath || '/';
   document.getElementById('explore-overlay').classList.add('active');
-  document.body.style.overflow = 'hidden';
   loadExplore(_explorePath);
 }
 function closeExplore() {
   document.getElementById('explore-overlay').classList.remove('active');
-  document.body.style.overflow = '';
 }
 function toggleExploreHidden() {
   _exploreShowHidden = !_exploreShowHidden;
@@ -7022,7 +7019,6 @@ async function openSkills() {
   const modal = document.getElementById('skills-modal');
   const list = document.getElementById('skills-list');
   modal.classList.add('active');
-  document.body.style.overflow = 'hidden';
   list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;text-align:center;padding:20px;">Loading...</div>';
   try {
     const skills = await fetch(API + '/api/skills').then(r => r.json());
@@ -7048,7 +7044,6 @@ async function openSkills() {
 }
 function closeSkills() {
   document.getElementById('skills-modal').classList.remove('active');
-  document.body.style.overflow = '';
 }
 
 function openAbout() {
