@@ -1362,8 +1362,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="theme-color" content="#0d1117">
 <link rel="manifest" href="/manifest.json">
 <title>amux</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%230d1117'/><rect x='4' y='4' width='44' height='44' rx='5' fill='%23161b22'/><rect x='52' y='4' width='44' height='44' rx='5' fill='%23161b22'/><rect x='4' y='52' width='44' height='44' rx='5' fill='%23161b22'/><rect x='52' y='52' width='44' height='44' rx='5' fill='%23161b22'/><polyline points='7,17 12,23 7,30' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><polyline points='56,17 61,23 56,30' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><polyline points='7,65 12,71 7,78' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><polyline points='56,65 61,71 56,78' fill='none' stroke='%2358a6ff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/><rect x='14' y='21' width='22' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='63' y='21' width='21' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='14' y='69' width='22' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='63' y='69' width='21' height='2.5' rx='1.2' fill='%2358a6ff' opacity='0.55'/><rect x='7' y='33' width='33' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/><rect x='56' y='33' width='30' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/><rect x='7' y='81' width='33' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/><rect x='56' y='81' width='30' height='2' rx='1' fill='%233d4f6e' opacity='0.75'/></svg>">
-<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
+<link rel="apple-touch-icon" href="/icon.png">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -6976,15 +6977,15 @@ PWA_MANIFEST = json.dumps({
     "background_color": "#0d1117",
     "theme_color": "#0d1117",
     "icons": [
-        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png"},
-        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png"},
+        {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+        {"src": "/icon.png", "sizes": "180x180", "type": "image/png"},
     ],
 })
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
 const CACHE = 'amux-v0.6.2';
-const SHELL_URLS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
+const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png'];
 
 // Install: pre-cache entire app shell
 self.addEventListener('install', e => {
@@ -7116,124 +7117,6 @@ self.addEventListener('sync', e => {
 """.strip()
 
 
-def _generate_icon_png(size):
-    """Generate amux icon: 4-pane terminal grid. Returns raw PNG bytes."""
-    import struct, zlib, math
-    sz = size
-
-    C_BG   = (13, 17, 23)    # #0d1117 outer background
-    C_PANE = (22, 27, 34)    # #161b22 pane background
-    C_BLUE = (88, 166, 255)  # #58a6ff accent/prompt
-    C_DIM  = (61, 79, 110)   # dim output lines
-
-    # RGBA pixel buffer initialised to C_BG
-    img = bytearray(bytes((*C_BG, 255)) * sz * sz)
-
-    def put(x, y, rgb, a=255):
-        if 0 <= x < sz and 0 <= y < sz:
-            i = (y * sz + x) * 4
-            if a >= 255:
-                img[i], img[i+1], img[i+2], img[i+3] = rgb[0], rgb[1], rgb[2], 255
-            else:
-                f = a / 255
-                img[i]   = int(img[i]   + (rgb[0] - img[i])   * f)
-                img[i+1] = int(img[i+1] + (rgb[1] - img[i+1]) * f)
-                img[i+2] = int(img[i+2] + (rgb[2] - img[i+2]) * f)
-                img[i+3] = 255
-
-    def fill_rrect(x0, y0, x1, y1, r, rgb, a=255):
-        for y in range(max(0, y0), min(sz, y1)):
-            for x in range(max(0, x0), min(sz, x1)):
-                xl, xr = x < x0 + r, x >= x1 - r
-                yt, yb = y < y0 + r, y >= y1 - r
-                if (xl or xr) and (yt or yb):
-                    cx = x0 + r if xl else x1 - r
-                    cy = y0 + r if yt else y1 - r
-                    if (x - cx) ** 2 + (y - cy) ** 2 > r * r:
-                        continue
-                put(x, y, rgb, a)
-
-    def fill_rect(x0, y0, x1, y1, rgb, a=255):
-        for y in range(max(0, y0), min(sz, y1)):
-            for x in range(max(0, x0), min(sz, x1)):
-                put(x, y, rgb, a)
-
-    def draw_chevron(x0, ytop, ybot, hw, thick, rgb):
-        """Draw > chevron: apex at (x0+hw, mid), arms to (x0, ytop/ybot)."""
-        ax, ay = x0 + hw, (ytop + ybot) / 2.0
-        dxu, dyu = ax - x0, ay - ytop
-        dxd, dyd = x0 - ax, ybot - ay
-        lu2 = dxu * dxu + dyu * dyu
-        ld2 = dxd * dxd + dyd * dyd
-        if lu2 == 0 or ld2 == 0:
-            return
-        bb_x0 = max(0, int(x0 - 1))
-        bb_x1 = min(sz, int(ax + thick + 2))
-        bb_y0 = max(0, int(ytop - thick - 1))
-        bb_y1 = min(sz, int(ybot + thick + 2))
-        for y in range(bb_y0, bb_y1):
-            for x in range(bb_x0, bb_x1):
-                tu = max(0.0, min(1.0, ((x - x0) * dxu + (y - ytop) * dyu) / lu2))
-                du = math.sqrt((x - x0 - tu * dxu) ** 2 + (y - ytop - tu * dyu) ** 2)
-                td = max(0.0, min(1.0, ((x - ax) * dxd + (y - ay) * dyd) / ld2))
-                dd = math.sqrt((x - ax - td * dxd) ** 2 + (y - ay - td * dyd) ** 2)
-                d = min(du, dd)
-                if d <= thick:
-                    put(x, y, rgb)
-                elif d <= thick + 1.0:
-                    put(x, y, rgb, int((thick + 1.0 - d) * 255))
-
-    gap    = max(2, int(sz * 0.04))
-    pane_w = (sz - 3 * gap) // 2
-    pane_h = pane_w
-    pane_r = max(2, int(sz * 0.05))
-    thick  = max(1.5, sz * 0.014)
-
-    for pi in range(4):
-        col, row = pi % 2, pi // 2
-        px = gap + col * (pane_w + gap)
-        py = gap + row * (pane_h + gap)
-
-        fill_rrect(px, py, px + pane_w, py + pane_h, pane_r, C_PANE)
-
-        chev_x   = px + int(pane_w * 0.08)
-        chev_top = py + int(pane_h * 0.30)
-        chev_bot = py + int(pane_h * 0.58)
-        chev_hw  = int(pane_w * 0.12)
-        draw_chevron(chev_x, chev_top, chev_bot, chev_hw, thick, C_BLUE)
-
-        cur_x0 = chev_x + chev_hw + max(1, int(pane_w * 0.03))
-        cur_y  = int((chev_top + chev_bot) / 2) - max(1, int(sz * 0.008))
-        cur_x1 = cur_x0 + int(pane_w * 0.35)
-        cur_h  = max(1, int(sz * 0.018))
-        fill_rect(cur_x0, cur_y, cur_x1, cur_y + cur_h, C_BLUE, 140)
-
-        line_x0 = px + int(pane_w * 0.08)
-        line_y0 = chev_bot + int(pane_h * 0.07)
-        line_h  = max(1, int(sz * 0.012))
-        for li in range(2):
-            lx1 = line_x0 + int(pane_w * (0.75 - li * 0.2))
-            ly  = line_y0 + li * int(pane_h * 0.10)
-            fill_rect(line_x0, ly, lx1, ly + line_h, C_DIM, 120)
-
-    rows = []
-    for y in range(sz):
-        rows.append(b'\x00' + bytes(img[y * sz * 4:(y + 1) * sz * 4]))
-    raw = b''.join(rows)
-
-    def chunk(tag, data):
-        c = tag + data
-        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
-
-    ihdr = struct.pack('>IIBBBBB', sz, sz, 8, 6, 0, 0, 0)
-    return (b'\x89PNG\r\n\x1a\n' +
-            chunk(b'IHDR', ihdr) +
-            chunk(b'IDAT', zlib.compress(raw)) +
-            chunk(b'IEND', b''))
-
-
-# Cache generated icons
-_icon_cache = {}
 
 
 # ═══════════════════════════════════════════
@@ -7420,11 +7303,12 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._raw(PWA_MANIFEST.encode(), "application/manifest+json", cache=True)
         if method == "GET" and path == "/sw.js":
             return self._raw(SERVICE_WORKER.encode(), "application/javascript")
-        if method == "GET" and path in ("/icon-192.png", "/icon-512.png"):
-            size = 192 if "192" in path else 512
-            if size not in _icon_cache:
-                _icon_cache[size] = _generate_icon_png(size)
-            return self._raw(_icon_cache[size], "image/png", cache=True)
+        if method == "GET" and path in ("/icon.svg", "/icon.png"):
+            icon_path = Path(__file__).resolve().parent / path.lstrip("/")
+            if icon_path.exists():
+                ct = "image/svg+xml" if path.endswith(".svg") else "image/png"
+                return self._raw(icon_path.read_bytes(), ct, cache=True)
+            return self._json({"error": "icon not found"}, 404)
 
         # GET /ca — serve mkcert root CA for device trust installation
         if method == "GET" and path == "/ca":
