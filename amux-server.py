@@ -1635,11 +1635,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explore-icon { font-size: 1rem; flex-shrink: 0; line-height: 1; }
   .explore-name { font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .explore-size { font-size: 0.72rem; color: var(--dim); flex-shrink: 0; }
-  .explore-copy { flex-shrink: 0; background: none; border: 1px solid transparent; color: var(--dim);
-    cursor: pointer; font-size: 0.7rem; padding: 2px 7px; border-radius: 4px;
-    opacity: 0; transition: opacity 0.15s; }
-  .explore-row:hover .explore-copy { opacity: 1; }
-  .explore-copy:hover { border-color: var(--border); background: var(--hover); color: var(--text); }
+  .explore-menu-btn { flex-shrink: 0; background: none; border: none; color: var(--dim);
+    cursor: pointer; font-size: 1rem; padding: 2px 6px; border-radius: 4px; line-height: 1;
+    opacity: 0.4; transition: opacity 0.15s; }
+  .explore-row:hover .explore-menu-btn, .explore-menu-btn:focus { opacity: 1; }
+  .explore-menu-popup { position: fixed; background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); z-index: 900; min-width: 140px;
+    overflow: hidden; }
+  .explore-menu-item { display: block; width: 100%; background: none; border: none; text-align: left;
+    padding: 11px 16px; font-size: 0.88rem; color: var(--text); cursor: pointer; }
+  .explore-menu-item:active, .explore-menu-item:hover { background: var(--hover); }
 
   /* Connect session list */
   /* Calendar */
@@ -5003,23 +5008,45 @@ function _fmtSize(bytes) {
   if (bytes < 1048576) return (bytes / 1024).toFixed(0) + 'K';
   return (bytes / 1048576).toFixed(1) + 'M';
 }
-function _copyExplorePath(path, btn) {
-  const orig = btn.textContent;
+function _showExploreMenu(path, btn) {
+  // Remove any existing popup
+  document.querySelectorAll('.explore-menu-popup').forEach(el => el.remove());
+  const popup = document.createElement('div');
+  popup.className = 'explore-menu-popup';
+  const copyItem = document.createElement('button');
+  copyItem.className = 'explore-menu-item';
+  copyItem.textContent = 'Copy path';
+  copyItem.onclick = () => { popup.remove(); _copyExplorePath(path); };
+  popup.appendChild(copyItem);
+  document.body.appendChild(popup);
+  // Position near button
+  const r = btn.getBoundingClientRect();
+  const pw = popup.offsetWidth || 140;
+  let left = r.right - pw;
+  if (left < 8) left = 8;
+  let top = r.bottom + 4;
+  if (top + 80 > window.innerHeight) top = r.top - 80;
+  popup.style.left = left + 'px';
+  popup.style.top = top + 'px';
+  // Dismiss on outside tap
+  setTimeout(() => {
+    const dismiss = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('pointerdown', dismiss, true); } };
+    document.addEventListener('pointerdown', dismiss, true);
+  }, 0);
+}
+function _copyExplorePath(path) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(path).then(() => {
-      btn.textContent = '✓'; setTimeout(() => { btn.textContent = orig; }, 1200);
-    }).catch(() => _copyExplorePathFallback(path, btn, orig));
+    navigator.clipboard.writeText(path).catch(() => _copyExplorePathFallback(path));
   } else {
-    _copyExplorePathFallback(path, btn, orig);
+    _copyExplorePathFallback(path);
   }
 }
-function _copyExplorePathFallback(path, btn, orig) {
+function _copyExplorePathFallback(path) {
   const ta = document.createElement('textarea');
   ta.value = path; ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
   document.body.appendChild(ta); ta.focus(); ta.select();
-  try { document.execCommand('copy'); btn.textContent = '✓'; } catch(e) { btn.textContent = '!'; }
+  try { document.execCommand('copy'); } catch(e) {}
   document.body.removeChild(ta);
-  setTimeout(() => { btn.textContent = orig; }, 1200);
 }
 async function loadExplore(path) {
   const body = document.getElementById('explore-body');
@@ -5058,10 +5085,8 @@ async function loadExplore(path) {
       const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
       const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
       const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
-      const copyBtn = entry.type === 'dir'
-        ? `<button class="explore-copy" title="Copy path" onclick="event.stopPropagation();_copyExplorePath('${entryPath.replace(/'/g,"\\'")}',this)">copy</button>`
-        : '';
-      row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${copyBtn}`;
+      const menuBtn = `<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu('${entryPath.replace(/'/g,"\\'")}',this)">⋯</button>`;
+      row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${menuBtn}`;
       if (entry.type === 'dir') {
         row.onclick = () => loadExplore(entryPath);
       } else {
