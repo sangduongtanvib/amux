@@ -2716,7 +2716,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
         <!-- Input row -->
-        <div class="ac-wrap" style="flex:1;">
+        <div class="ac-wrap" style="flex:1;min-width:0;overflow:hidden;">
           <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a message or drop a file..."
             autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
             enterkeyhint="enter" style="width:100%;"
