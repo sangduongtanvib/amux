@@ -1525,13 +1525,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     white-space: nowrap; flex-shrink: 0;
   }
   .chip:active { background: rgba(88,166,255,0.25); }
-  .send-row { display: flex; gap: 8px; }
+  .send-row { display: flex; gap: 8px; min-width: 0; overflow: hidden; }
   .send-input {
-    flex: 1; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
+    flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     outline: none; min-height: 44px; max-height: calc(1.4em * 10 + 28px);
-    resize: none; overflow-y: auto; line-height: 1.4;
-    font-family: inherit; field-sizing: content;
+    resize: none; overflow-x: hidden; overflow-y: auto; line-height: 1.4;
+    font-family: inherit; field-sizing: content; word-break: break-word;
   }
   .send-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
 
@@ -1867,8 +1867,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row {
     display: none; gap: 8px; padding-top: 6px;
   }
-  .peek-cmd-row.open { display: flex; }
-  .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; }
+  .peek-cmd-row.open { display: flex; min-width: 0; overflow: hidden; }
+  .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; min-width: 0; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
   /* File attachment bar */
   .peek-attach-bar { display: none; gap: 6px; padding: 4px 0 2px; flex-wrap: wrap; width: 100%; }
