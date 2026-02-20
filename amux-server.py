@@ -7364,6 +7364,19 @@ class CCHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length))
 
     def _route(self, method: str):
+        # Redirect raw-IP requests to Tailscale hostname (cert only covers hostname)
+        ts = getattr(self.server, "ts_hostname", "")
+        if ts:
+            host = self.headers.get("Host", "")
+            host_name = host.rsplit(":", 1)[0] if ":" in host else host
+            if host_name and host_name != ts and host_name not in ("localhost", "127.0.0.1"):
+                port = self.server.server_address[1]
+                target = f"https://{ts}:{port}{self.path}"
+                self.send_response(301)
+                self.send_header("Location", target)
+                self.end_headers()
+                return
+
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
@@ -8446,7 +8459,8 @@ def main():
             cert, key, ts_hostname = _ensure_tls(lan_ip)
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert, key)
-            server.ssl_ctx = ctx  # per-connection TLS in get_request()
+            server.ssl_ctx = ctx  # per-connection TLS in process_request_thread()
+            server.ts_hostname = ts_hostname  # for IP→hostname redirect
             scheme = "https"
         except Exception as e:
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
