@@ -6020,7 +6020,6 @@ function openBoardDetail(id) {
   meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
   document.getElementById('bd-save-status').textContent = '';
   document.getElementById('board-detail-overlay').classList.add('active');
-  document.body.style.overflow = 'hidden';
   setTimeout(() => document.getElementById('bd-title').focus(), 100);
 }
 
@@ -6079,7 +6078,6 @@ function closeBoardDetail() {
     }
   }
   document.getElementById('board-detail-overlay').classList.remove('active');
-  document.body.style.overflow = '';
   boardDetailId = null;
   // Refresh peek issues panel if open
   if (_peekTab === 'issues') renderPeekIssues();
@@ -6090,12 +6088,13 @@ function closeBoardDetail() {
   const el = document.getElementById('board-detail-overlay');
   let sx = 0, sy = 0, tracking = false;
   el.addEventListener('touchstart', e => {
+    if (!el.classList.contains('active')) return;
     const t = e.touches[0];
     sx = t.clientX; sy = t.clientY; tracking = true;
     el.style.transition = 'none';
   }, {passive: true});
   el.addEventListener('touchmove', e => {
-    if (!tracking) return;
+    if (!tracking || !el.classList.contains('active')) return;
     const dx = e.touches[0].clientX - sx;
     const dy = Math.abs(e.touches[0].clientY - sy);
     if (dy > 30 && dx < 30) { tracking = false; el.style.transform = ''; el.style.transition = ''; return; }
@@ -6104,6 +6103,7 @@ function closeBoardDetail() {
   el.addEventListener('touchend', e => {
     if (!tracking) { el.style.transition = ''; return; }
     tracking = false;
+    if (!el.classList.contains('active')) { el.style.transition = ''; return; }
     const dx = e.changedTouches[0].clientX - sx;
     el.style.transition = 'transform 0.25s cubic-bezier(.4,0,.2,1), opacity 0.25s, pointer-events 0s';
     if (dx > 80) {
