@@ -696,18 +696,24 @@ async function testAPI() {
     ['todo','doing','done'].every(id => statuses.some(s => s.id === id)));
 
   // ── PATCH board item ───────────────────────────────────────────────────────
-  const aliveItems = boardItems.filter(i => !i.deleted);
-  if (aliveItems.length > 0) {
-    const target = aliveItems[0];
-    const origStatus = target.status;
-    const newStatus = origStatus === 'todo' ? 'doing' : 'todo';
-    const rPatch = await api.patch(`/api/board/${target.id}`, {
-      data: { status: newStatus }
-    });
-    log('PATCH /api/board/<id> updates status', rPatch.ok(), `${target.id}: ${origStatus} → ${newStatus}`);
-
-    // Restore
-    await api.patch(`/api/board/${target.id}`, { data: { status: origStatus } });
+  // Try each item until one patches successfully (server restarts can cause WAL
+  // snapshots where an item appears alive in GET but is already deleted by PATCH time)
+  {
+    let patched = false;
+    for (const candidate of boardItems) {
+      const origStatus = candidate.status;
+      const newStatus = origStatus === 'todo' ? 'doing' : 'todo';
+      const rPatch = await api.patch(`/api/board/${candidate.id}`, { data: { status: newStatus } });
+      if (rPatch.ok()) {
+        log('PATCH /api/board/<id> updates status', true, `${candidate.id}: ${origStatus} → ${newStatus}`);
+        await api.patch(`/api/board/${candidate.id}`, { data: { status: origStatus } }); // restore
+        patched = true;
+        break;
+      }
+    }
+    if (!patched && boardItems.length > 0) {
+      log('PATCH /api/board/<id> updates status', false, 'all candidates returned non-200');
+    }
   }
 
   // ── Delta sync ─────────────────────────────────────────────────────────────
