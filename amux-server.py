@@ -2874,8 +2874,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="peek-status" class="overlay-status"></div>
     <div class="peek-cmd-bar">
-      <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25B2; Send command</button>
-      <div class="peek-cmd-row" id="peek-cmd-row" style="flex-wrap:wrap;">
+      <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
+      <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
         <div class="chips" style="width:100%;margin:0;">
           <div class="chip" onclick="peekQuickKeys('C-c')">Ctrl-C</div>
           <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
@@ -4487,15 +4487,10 @@ function openPeek(name) {
   const cmdInp = document.getElementById('peek-cmd-input');
   cmdInp.value = draft;
   autoGrow(cmdInp);
-  if (draft) {
-    peekCmdOpen = true;
-    document.getElementById('peek-cmd-row').classList.add('open');
-    document.getElementById('peek-cmd-toggle').innerHTML = '&#x25BC; Send command';
-  } else {
-    peekCmdOpen = false;
-    document.getElementById('peek-cmd-row').classList.remove('open');
-    document.getElementById('peek-cmd-toggle').innerHTML = '&#x25B2; Send command';
-  }
+  peekCmdOpen = true;
+  document.getElementById('peek-cmd-row').classList.add('open');
+  document.getElementById('peek-cmd-toggle').innerHTML = '&#x25BC; Send command';
+  if (draft) setTimeout(() => document.getElementById('peek-cmd-input').focus({ preventScroll: true }), 50);
   document.getElementById('peek-title').textContent = name;
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
@@ -4722,7 +4717,7 @@ function applyPeekSearch() {
 }
 
 // ── Peek command bar ──
-let peekCmdOpen = false;
+let peekCmdOpen = true;
 function togglePeekCmd() {
   peekCmdOpen = !peekCmdOpen;
   const row = document.getElementById('peek-cmd-row');
