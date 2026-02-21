@@ -2967,7 +2967,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a message or drop a file..."
             autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
             enterkeyhint="enter" style="width:100%;"
-            oninput="autoGrow(this);slashAcUpdate()" onkeydown="slashAcKeydown(event)"
+            oninput="autoGrow(this);slashAcUpdate();cmdHistoryReset()" onkeydown="slashAcKeydown(event)"
             onpaste="handlePeekPaste(event)"></textarea>
           <div id="slash-ac-list" class="ac-list slash-ac"></div>
         </div>
@@ -3788,7 +3788,7 @@ function render() {
           <textarea class="send-input" id="input-${s.name}" rows="1"
             placeholder="Send to ${esc(s.name)}..." autocomplete="off" autocorrect="on"
             autocapitalize="sentences" spellcheck="true" enterkeyhint="enter"
-            oninput="autoGrow(this);cardSlashAcUpdate('${s.name}')"
+            oninput="autoGrow(this);cardSlashAcUpdate('${s.name}');cmdHistoryReset()"
             onkeydown="cardSlashAcKeydown('${s.name}',event)"></textarea>
           <button class="btn primary" onclick="sendFromInput('${s.name}')">Send</button>
         </div>` : ''}
@@ -4388,6 +4388,7 @@ async function sendFromInput(name) {
   const inp = document.getElementById('input-' + name);
   if (!inp || !inp.value.trim()) return;
   const text = inp.value.trim();
+  cmdHistoryAdd(text);
   inp.value = '';
   inp.style.height = 'auto';
   await doSend(name, text);
@@ -4946,6 +4947,7 @@ async function sendPeekCmd() {
   const text = inp.value.trim();
   const files = peekFiles.filter(f => f.path); // only successfully uploaded
   if (!text && files.length === 0) return;
+  cmdHistoryAdd(text);
 
   // Build message: inline @path references (no newlines — tmux treats \n as Enter,
   // which would split the message and send the path as a separate submit)
@@ -5023,9 +5025,12 @@ function slashAcPick(i) {
 }
 
 function slashAcKeydown(e) {
+  const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
+    if (e.key === 'ArrowUp' && inp.value.indexOf('\n') === -1) { e.preventDefault(); cmdHistoryUp(inp); return; }
+    if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
   }
   if (e.key === 'ArrowUp') {
@@ -5052,6 +5057,39 @@ function slashAcHighlight() {
   const items = document.getElementById('slash-ac-list').querySelectorAll('.ac-item');
   items.forEach((el, i) => el.classList.toggle('selected', i === slashAcSelected));
   if (items[slashAcSelected]) items[slashAcSelected].scrollIntoView({ block: 'nearest' });
+}
+
+// ── Command History (Up/Down arrow navigation in send inputs) ──
+let _cmdHistory = JSON.parse(localStorage.getItem('amux_cmd_history') || '[]');
+let _cmdHistoryIdx = -1;   // -1 = not browsing history
+let _cmdHistoryDraft = ''; // saved current input when starting to browse
+
+function cmdHistoryAdd(text) {
+  if (!text.trim()) return;
+  if (_cmdHistory.length && _cmdHistory[_cmdHistory.length - 1] === text) { _cmdHistoryIdx = -1; return; }
+  _cmdHistory.push(text);
+  if (_cmdHistory.length > 500) _cmdHistory = _cmdHistory.slice(-500);
+  localStorage.setItem('amux_cmd_history', JSON.stringify(_cmdHistory));
+  _cmdHistoryIdx = -1;
+}
+
+function cmdHistoryReset() { _cmdHistoryIdx = -1; }
+
+function cmdHistoryUp(inp) {
+  if (!_cmdHistory.length) return;
+  if (_cmdHistoryIdx === -1) { _cmdHistoryDraft = inp.value; _cmdHistoryIdx = _cmdHistory.length - 1; }
+  else if (_cmdHistoryIdx > 0) { _cmdHistoryIdx--; }
+  inp.value = _cmdHistory[_cmdHistoryIdx];
+  autoGrow(inp);
+  requestAnimationFrame(() => { inp.selectionStart = inp.selectionEnd = inp.value.length; });
+}
+
+function cmdHistoryDown(inp) {
+  if (_cmdHistoryIdx === -1) return;
+  if (_cmdHistoryIdx < _cmdHistory.length - 1) { _cmdHistoryIdx++; inp.value = _cmdHistory[_cmdHistoryIdx]; }
+  else { _cmdHistoryIdx = -1; inp.value = _cmdHistoryDraft; }
+  autoGrow(inp);
+  requestAnimationFrame(() => { inp.selectionStart = inp.selectionEnd = inp.value.length; });
 }
 
 // ── Chip populates input ──
@@ -5101,9 +5139,12 @@ function cardSlashAcPick(name, i) {
 }
 
 function cardSlashAcKeydown(name, e) {
+  const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
   if (!el || !el.classList.contains('open')) {
+    if (e.key === 'ArrowUp' && inp && inp.value.indexOf('\n') === -1) { e.preventDefault(); cmdHistoryUp(inp); return; }
+    if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
   }
   if (e.key === 'ArrowUp') {
