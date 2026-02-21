@@ -2508,7 +2508,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     transition: border-color 0.15s;
   }
   .new-status-input:focus { border-color: var(--accent); }
-  .board-filters { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 0 8px; align-items: center; }
+  .board-filters { display: flex; gap: 6px; flex-wrap: nowrap; padding: 6px 0 8px; align-items: center; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .board-filters::-webkit-scrollbar { display: none; }
   .board-filter-label { font-size: 0.68rem; color: var(--dim); white-space: nowrap; }
   .board-filter-chip {
     font-size: 0.72rem; padding: 3px 10px; border-radius: 12px;
