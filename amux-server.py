@@ -5577,11 +5577,48 @@ function peekCheckSelection() {
 }
 document.getElementById('peek-body').addEventListener('mousedown', () => { peekSelecting = true; clearTimeout(peekSelectTimer); });
 document.getElementById('peek-body').addEventListener('touchstart', () => { peekSelecting = true; clearTimeout(peekSelectTimer); }, {passive: true});
+// Force URLs in peek output to open in the system browser (important for PWA desktop/mobile).
+// window.open with noopener,noreferrer is more reliable than target=_blank in PWA mode.
+document.getElementById('peek-body').addEventListener('click', (e) => {
+  const a = e.target.closest('a[href]');
+  if (!a) return;
+  const href = a.href;
+  if (href && /^https?:\/\//.test(href)) {
+    e.preventDefault();
+    window.open(href, '_blank', 'noopener,noreferrer');
+  }
+});
 document.addEventListener('mouseup', () => { peekCheckSelection(); });
 document.addEventListener('touchend', () => { peekCheckSelection(); });
 
 // Handle Ctrl+C as copy and Ctrl+V as paste in peek (Mac users may use Ctrl instead of Cmd)
 document.addEventListener('keydown', (e) => {
+  // ── Global clipboard handling ──
+  // Chrome PWA on macOS beeps when clipboard shortcuts hit non-editable elements.
+  // Handle Cmd/Ctrl+C and Cmd/Ctrl+V globally so the OS never sees unhandled clipboard keys.
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+    const ae = document.activeElement;
+    const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+    if (!inInput) {
+      if (e.key === 'c') {
+        e.preventDefault();
+        const sel = window.getSelection()?.toString();
+        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        return;
+      }
+      if (e.key === 'v') {
+        // Focus the best available input — then DON'T preventDefault so the browser
+        // pastes natively into the newly focused element.
+        const peekOpen = document.getElementById('peek-overlay')?.classList.contains('active');
+        const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
+        const inp = peekOpen ? document.getElementById('peek-cmd-input')
+          : boardOpen ? document.querySelector('#board-detail-overlay textarea, #board-detail-overlay input')
+          : document.querySelector('.card.open .send-input') || document.getElementById('search');
+        if (inp) inp.focus({ preventScroll: true });
+        return; // no preventDefault — browser pastes into now-focused element
+      }
+    }
+  }
   if (document.getElementById('grid-view').classList.contains('active')) {
     if (e.key === 'Escape') { e.preventDefault(); exitGridMode(); return; }
     return;
