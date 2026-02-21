@@ -2755,31 +2755,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #gridstack-container .ui-resizable-handle { opacity: 0.3; }
   #gridstack-container .ui-resizable-handle:hover { opacity: 0.8; }
   .gp-send {
-    display: flex; flex-direction: column; gap: 4px; padding: 5px 6px 6px;
+    display: flex; flex-direction: column; gap: 0; padding: 8px 10px 10px;
     border-top: 1px solid var(--border); flex-shrink: 0;
     background: #161b22;
   }
-  .gp-chips {
-    display: flex; gap: 3px; flex-wrap: wrap; align-items: center;
-  }
-  .gp-chips .chip {
-    font-size: 0.65rem; padding: 2px 6px; border-radius: 8px;
-  }
-  .gp-send-row { display: flex; gap: 4px; align-items: flex-end; }
-  .gp-send-input {
-    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
-    color: var(--text); font-size: 0.73rem; padding: 4px 8px; min-width: 0; outline: none;
-    resize: none; overflow-x: hidden; overflow-y: auto; line-height: 1.4;
-    font-family: inherit; min-height: 28px; max-height: calc(1.4em * 5 + 16px);
-    field-sizing: content;
-  }
-  .gp-send-input:focus { border-color: var(--accent); }
-  .gp-send-btn {
-    background: var(--accent); border: none; color: #fff; border-radius: 4px;
-    font-size: 0.73rem; padding: 4px 8px; cursor: pointer; flex-shrink: 0;
-    align-self: flex-end;
-  }
-  .gp-send-btn:hover { opacity: 0.85; }
+  /* chips row inside workspace panes — same as session cards */
+  .gp-send .chips { margin-bottom: 8px; }
+  /* send row inside workspace panes — same as session cards */
+  .gp-send .send-row { gap: 8px; }
   #tab-grid { display: none; }
   @media (min-width: 769px) { #tab-grid { display: block; } }
 </style>
@@ -5896,11 +5879,15 @@ function _pwaCb(e) {
     }
   }
 
-  // Cmd+V — paste into best available input
-  // Use execCommand('paste') first — it's synchronous, requires no permission prompt,
-  // and works from a trusted keydown event. Fall back to clipboard.readText() only if
-  // execCommand fails (execCommand triggers the browser "Paste" confirmation UI).
+  // Cmd+V — paste into best available input.
+  // In regular browser tabs native paste works fine (the 'paste' event fires).
+  // Only intercept in standalone/PWA mode where native paste events never fire.
   if (k === 'v') {
+    const isPWA = window.matchMedia?.('(display-mode: standalone)').matches
+               || navigator.standalone === true;
+    if (!isPWA) return false; // let browser + paste-event handler manage it
+    if (!navigator.clipboard?.readText) return false;
+
     const peekOpen  = document.getElementById('peek-overlay')?.classList.contains('active');
     const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
     const gridOpen  = document.getElementById('grid-view')?.classList.contains('active');
@@ -5912,18 +5899,16 @@ function _pwaCb(e) {
       || document.getElementById('search');
     if (target) {
       e.preventDefault();
-      target.focus({ preventScroll: true });
-      if (!document.execCommand('paste') && navigator.clipboard?.readText) {
-        navigator.clipboard.readText().then(text => {
-          if (!text) return;
-          const s = target.selectionStart ?? target.value.length;
-          const en = target.selectionEnd ?? target.value.length;
-          target.value = target.value.slice(0, s) + text + target.value.slice(en);
-          target.selectionStart = target.selectionEnd = s + text.length;
-          target.dispatchEvent(new Event('input', { bubbles: true }));
-          if (typeof autoGrow === 'function') autoGrow(target);
-        }).catch(() => {});
-      }
+      navigator.clipboard.readText().then(text => {
+        if (!text) return;
+        target.focus({ preventScroll: true });
+        const s = target.selectionStart ?? target.value.length;
+        const en = target.selectionEnd ?? target.value.length;
+        target.value = target.value.slice(0, s) + text + target.value.slice(en);
+        target.selectionStart = target.selectionEnd = s + text.length;
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        if (typeof autoGrow === 'function') autoGrow(target);
+      }).catch(() => {});
       return true;
     }
   }
@@ -7247,7 +7232,7 @@ function addGridPane(name, x, y, w, h) {
     '</div>' +
     '<div class="gp-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
     '<div class="gp-send">' +
-      '<div class="gp-chips chips">' +
+      '<div class="chips">' +
         '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl-C</div>' +
         '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Up\')">&#x2191;</div>' +
         '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Down\')">&#x2193;</div>' +
@@ -7258,12 +7243,12 @@ function addGridPane(name, x, y, w, h) {
         '<div class="chip danger" onclick="gpChipToInput(\'' + safeName + '\',\'/compact\')">/compact</div>' +
         '<div class="chip danger" onclick="gpChipToInput(\'' + safeName + '\',\'/clear\')">/clear</div>' +
       '</div>' +
-      '<div class="gp-send-row">' +
-        '<textarea class="gp-send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
+      '<div class="send-row">' +
+        '<textarea class="send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
           ' oninput="autoGrow(this);cmdHistoryReset()"' +
           ' onfocus="_lastActivePane=\'' + safeName + '\'"' +
           ' onkeydown="gpSendKeydown(\'' + safeName + '\',event)"></textarea>' +
-        '<button class="gp-send-btn" onclick="sendGridCmd(\'' + safeName + '\')">&#x21B5;</button>' +
+        '<button class="btn primary" onclick="sendGridCmd(\'' + safeName + '\')">Send</button>' +
       '</div>' +
     '</div>';
   const widget = _grid.addWidget({ id: name, x, y, w: w || 6, h: h || 7, content });
