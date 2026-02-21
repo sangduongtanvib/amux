@@ -1210,7 +1210,7 @@ def _ensure_memory(name: str, work_dir: str):
     _write_claude_memory(name, work_dir)
 
 
-def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
+def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     f = CC_SESSIONS / f"{name}.env"
     if not f.exists():
@@ -1221,6 +1221,30 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
     flags = cfg.get("CC_FLAGS", "")
     _ensure_memory(name, work_dir)
+
+    # Determine session-specific conversation ID for isolation.
+    # Each amux session keeps its own Claude conversation, regardless of directory.
+    # Skip when the caller supplies explicit conversation flags (e.g. clone --fork-session).
+    meta = _load_meta(name)
+    if not _skip_conv_id:
+        conv_id = meta.get("cc_conversation_id", "")
+        if not conv_id:
+            # First start — generate a fresh UUID so this session gets its own conversation
+            conv_id = str(uuid.uuid4())
+            meta["cc_conversation_id"] = conv_id
+            session_flag = f"--session-id {conv_id}"
+        else:
+            # Subsequent start — resume this session's own conversation
+            conv_file = (
+                CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
+            )
+            if conv_file.exists():
+                session_flag = f"--resume {conv_id}"
+            else:
+                # Conversation was cleared/deleted — start fresh with the same ID
+                session_flag = f"--session-id {conv_id}"
+    else:
+        session_flag = ""
 
     # Load defaults
     defaults_file = CC_HOME / "defaults.env"
@@ -1234,6 +1258,8 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
         cmd += f" {default_flags}"
     if flags:
         cmd += f" {flags}"
+    if session_flag:
+        cmd += f" {session_flag}"
     if extra_flags:
         cmd += f" {extra_flags}"
     # Default to sonnet if no --model specified anywhere
@@ -1273,7 +1299,6 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
             ["tmux", "rename-window", "-t", tmux_sess, name],
             capture_output=True, timeout=5,
         )
-        meta = _load_meta(name)
         meta["last_started"] = int(time.time())
         meta["start_count"] = meta.get("start_count", 0) + 1
         _save_meta(name, meta)
@@ -3664,6 +3689,7 @@ function render() {
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();clearScrollback('${s.name}')"><span class="mi">&#x239A;</span> Clear scrollback</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();duplicateSession('${s.name}')"><span class="mi">&#x2398;</span> Duplicate</div>
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();cloneSession('${s.name}')"><span class="mi">&#x1F504;</span> Clone &amp; continue</div>` : ''}
+          ${!s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();newConversation('${s.name}')"><span class="mi">&#x1F195;</span> New conversation</div>` : ''}
           <div class="card-menu-sep"></div>
           <div class="card-menu-item danger" onclick="event.stopPropagation();deleteSession('${s.name}')"><span class="mi">&#x2716;</span> Delete</div>
         </div>
@@ -4217,6 +4243,15 @@ function duplicateSession(session) {
 function cloneSession(session) {
   closeAllMenus();
   editField(session, 'clone', '');
+}
+
+async function newConversation(session) {
+  closeAllMenus();
+  if (!await showConfirm('Start a fresh conversation for "' + session + '"?\n\nThe next time you start this session, it will begin a new Claude conversation (history in the old conversation is preserved but won\'t be continued).', 'Reset', true)) return;
+  await apiCall(API + '/api/sessions/' + session + '/config', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ new_conversation: true })
+  });
 }
 
 async function deleteSession(session) {
@@ -8572,12 +8607,9 @@ class CCHandler(BaseHTTPRequestHandler):
                     _write_claude_memory(name, wd)
                 return self._json({"ok": True})
             if action == "start":
-                cfg = parse_env_file(CC_SESSIONS / f"{name}.env") if (CC_SESSIONS / f"{name}.env").exists() else {}
-                work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
-                session_id = _find_latest_session_id(work_dir)
-                extra = f"--resume {session_id}" if session_id else ""
-                ok, msg = start_session(name, extra)
-                return self._json({"ok": ok, "message": msg, "resumed": bool(session_id)}, 200 if ok else 500)
+                ok, msg = start_session(name)
+                meta = _load_meta(name)
+                return self._json({"ok": ok, "message": msg, "resumed": bool(meta.get("cc_conversation_id"))}, 200 if ok else 500)
             if action == "stop":
                 ok, msg = stop_session(name)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
@@ -8616,11 +8648,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 shutil.copy2(env_file, new_file)
                 cfg = parse_env_file(env_file)
                 work_dir = cfg.get("CC_DIR", str(Path.home()))
-                # Try to find existing conversation to resume with full context
-                session_id = _find_latest_session_id(work_dir)
+                # Use the source session's own conversation ID (not just any recent file)
+                source_meta = _load_meta(name)
+                session_id = source_meta.get("cc_conversation_id", "") or _find_latest_session_id(work_dir)
                 if session_id:
                     # Resume the conversation in a forked session — full history
-                    ok, msg = start_session(new_name, f"--resume {session_id} --fork-session")
+                    ok, msg = start_session(new_name, f"--resume {session_id} --fork-session", _skip_conv_id=True)
                     method_used = "resume"
                 else:
                     # No conversation file found — fall back to scrollback context
@@ -8788,6 +8821,15 @@ class CCHandler(BaseHTTPRequestHandler):
                     cfg["CC_TAGS"] = body["tags"].strip()
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "tags updated"})
+
+                # Clear conversation history (next start gets a fresh session)
+                if body.get("new_conversation"):
+                    if is_running(name):
+                        return self._json({"error": "stop the session before starting a new conversation"}, 409)
+                    meta = _load_meta(name)
+                    meta.pop("cc_conversation_id", None)
+                    _save_meta(name, meta)
+                    return self._json({"ok": True, "message": "conversation reset — next start will be a fresh conversation"})
 
                 return self._json({"error": "nothing to update"}, 400)
             return self._json({"error": "not found"}, 404)
