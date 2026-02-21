@@ -1537,7 +1537,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .dot.stopped { background: var(--red); opacity: 0.5; }
   .card-name { font-weight: 600; font-size: 1.05rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .card-dir { color: var(--dim); font-size: 0.82rem; margin-top: 4px; margin-left: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-dir { color: var(--dim); font-size: 0.82rem; margin-top: 4px; margin-left: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 5px; }
+  .card-dir-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-dir-edit { flex-shrink: 0; opacity: 0.3; transition: opacity 0.15s; cursor: pointer; font-size: 0.85rem; padding: 0 2px; border-radius: 3px; }
+  .card-dir-edit:hover { color: var(--accent); opacity: 1 !important; }
   .card-preview { color: var(--dim); font-size: 0.78rem; margin-top: 4px; margin-left: 20px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-preview-lines {
     color: var(--dim); font-size: 0.75rem; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
@@ -3747,7 +3750,7 @@ function render() {
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
         </div>` : ''}
       </div>
-      ${s.dir ? `<div class="card-dir" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</div>` : ''}
+      ${s.dir ? `<div class="card-dir"><span class="card-dir-path" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</span>${isExp ? `<span class="card-dir-edit" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')" title="Change directory">&#x270E;</span>` : ''}</div>` : ''}
       ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
@@ -5730,6 +5733,16 @@ document.addEventListener('keydown', (e) => {
   }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
   if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
+  // Cmd/Ctrl+C with no selection → send interrupt; Cmd/Ctrl+X → send Ctrl-X
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+    const ae = document.activeElement;
+    const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA');
+    const hasSelection = window.getSelection().toString().length > 0;
+    if (!inInput && !hasSelection) {
+      if (e.key === 'c') { e.preventDefault(); peekQuickKeys('C-c'); return; }
+      if (e.key === 'x') { e.preventDefault(); peekQuickKeys('C-x'); return; }
+    }
+  }
 });
 
 // ═══════ LAYOUT MODES (list / grid) ═══════
