@@ -1418,22 +1418,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .tile-grid-only { display: flex; align-items: center; justify-content: center; }
     .cards.grid-mode { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
   }
-  /* Sortable drag feedback (list mode only) */
+  /* Sortable drag feedback */
   .sortable-ghost { opacity: 0.25; background: var(--accent) !important; border-color: var(--accent) !important; }
   .sortable-chosen { box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 10; }
   .sortable-drag { opacity: 0; }
-  /* GridStack tile grid — overrides CSS grid layout when active */
-  .cards.grid-mode.gs-tile-active { display: block !important; position: relative !important; }
-  .cards.grid-mode.gs-tile-active .grid-stack-item-content {
-    overflow: hidden; border-radius: 10px;
-  }
-  .cards.grid-mode.gs-tile-active .grid-stack-item-content .card {
-    height: 100%; cursor: grab;
-  }
-  .cards.grid-mode.gs-tile-active .grid-stack-item-content .card:active { cursor: grabbing; }
-  .cards.grid-mode.gs-tile-active .grid-stack-item.ui-draggable-dragging .card { cursor: grabbing; }
-  .cards.grid-mode:not(.gs-tile-active) .card { cursor: grab; }
-  .cards.grid-mode:not(.gs-tile-active) .card:active { cursor: grabbing; }
+  .cards.grid-mode .card { cursor: grab; }
+  .cards.grid-mode .card:active { cursor: grabbing; }
 
   .card {
     background: var(--card); border: 1px solid var(--border);
@@ -3735,7 +3725,6 @@ function render() {
 
   // Grid mode: flat list sorted by saved card order, no grouping (desktop only)
   if (layoutMode === 'grid' && window.innerWidth >= 900) {
-    if (_tileDragging) return; // don't re-render while drag is active — would break GridStack
     const orderMap = {};
     cardOrder.forEach((name, i) => { orderMap[name] = i; });
     const sortedFiltered = [...filtered].sort((a, b) => {
@@ -3743,12 +3732,10 @@ function render() {
       const bi = orderMap[b.name] !== undefined ? orderMap[b.name] : 9999;
       return ai - bi;
     });
-    // Destroy GridStack before replacing innerHTML (cleanup before new DOM)
-    destroyTileGrid();
     el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
     for (const [id, val] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = val; autoGrow(inp); } }
     if (focusedId) { const inp = document.getElementById(focusedId); if (inp) inp.focus({ preventScroll: true }); }
-    requestAnimationFrame(initTileGrid);
+    requestAnimationFrame(initSortable);
     return;
   }
 
@@ -5670,9 +5657,7 @@ document.addEventListener('keydown', (e) => {
 let layoutMode = localStorage.getItem('amux_layout') || 'group';
 let cardOrder = JSON.parse(localStorage.getItem('amux_card_order') || '[]');
 let _sortable = null;
-let _tileGrid = null;   // GridStack instance for session card grid mode
-let _tileDragging = false;
-let _tileJustDragged = false; // toggle() guard — prevent expand on drag-end click
+let _tileJustDragged = false; // keep for toggle() guard
 
 function setLayoutMode(mode) {
   layoutMode = mode;
@@ -5682,14 +5667,11 @@ function setLayoutMode(mode) {
   document.getElementById('tile-grid-btn').classList.toggle('active', mode === 'grid');
   const cards = document.querySelector('.cards');
   if (cards) cards.classList.toggle('grid-mode', mode === 'grid');
-  if (mode !== 'grid') destroyTileGrid();
   if (mode === 'group') destroySortable();
   render();
 }
 
 function initSortable() {
-  // Grid mode uses GridStack — SortableJS only handles list/flat modes
-  if (layoutMode === 'grid') { initTileGrid(); return; }
   if (typeof Sortable === 'undefined') return;
   destroySortable();
   const cards = document.querySelector('.cards');
@@ -5714,103 +5696,6 @@ function initSortable() {
 
 function destroySortable() {
   if (_sortable) { try { _sortable.destroy(); } catch(e) {} _sortable = null; }
-}
-
-// ── GridStack tile grid (session card grid mode) ──
-function initTileGrid() {
-  if (_tileDragging) return; // never reinit while drag is active
-  destroyTileGrid();
-  const cards = document.querySelector('.cards.grid-mode');
-  if (!cards || typeof GridStack === 'undefined') return;
-
-  const cardEls = Array.from(cards.querySelectorAll(':scope > .card[data-session]'));
-  if (!cardEls.length) return;
-
-  // Load saved positions
-  let saved = {};
-  try { saved = JSON.parse(localStorage.getItem('amux_tile_grid_layout') || '{}'); } catch(e) {}
-
-  // Column count: approximate auto-fill minmax(300px, 1fr)
-  const cols = Math.max(2, Math.floor((cards.clientWidth + 12) / 312));
-
-  // Wrap each card in a .grid-stack-item — GridStack will manage their positions
-  cardEls.forEach((card) => {
-    const name = card.dataset.session;
-    const pos = name ? saved[name] : null;
-    const wrapper = document.createElement('div');
-    wrapper.className = 'grid-stack-item';
-    if (name) wrapper.dataset.gsName = name;
-    wrapper.setAttribute('gs-w', '1');
-    wrapper.setAttribute('gs-h', '1');
-    if (pos && pos.x !== undefined && pos.y !== undefined) {
-      wrapper.setAttribute('gs-x', String(pos.x));
-      wrapper.setAttribute('gs-y', String(pos.y));
-    } else {
-      wrapper.setAttribute('gs-auto-position', 'true');
-    }
-    const inner = document.createElement('div');
-    inner.className = 'grid-stack-item-content';
-    wrapper.appendChild(inner);
-    card.parentNode.insertBefore(wrapper, card);
-    inner.appendChild(card);
-  });
-
-  cards.classList.add('gs-tile-active');
-
-  // Compute cell height: target ~240px cards (matches typical compact card height)
-  const cellH = Math.round(240 / 1); // 1 row = 240px
-  _tileGrid = GridStack.init({
-    column: cols,
-    cellHeight: cellH,
-    margin: 12,
-    float: false,
-    resizable: false,
-    animate: true,
-    draggable: { handle: '.card-header' },
-  }, cards);
-
-  _tileGrid.on('dragstart', () => { _tileDragging = true; _tileJustDragged = false; });
-  _tileGrid.on('dropped', () => {
-    _tileDragging = false;
-    _tileJustDragged = true;
-    _saveTileGridLayout();
-    _syncCardOrderFromTileGrid();
-  });
-  _tileGrid.on('change', _saveTileGridLayout);
-}
-
-function _saveTileGridLayout() {
-  if (!_tileGrid) return;
-  const pos = {};
-  (_tileGrid.engine?.nodes || []).forEach(n => {
-    const name = n.el?.dataset?.gsName;
-    if (name) pos[name] = { x: n.x, y: n.y, w: n.w, h: n.h };
-  });
-  try { localStorage.setItem('amux_tile_grid_layout', JSON.stringify(pos)); } catch(e) {}
-}
-
-function _syncCardOrderFromTileGrid() {
-  if (!_tileGrid) return;
-  const sorted = (_tileGrid.engine?.nodes || []).slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
-  cardOrder = sorted.map(n => n.el?.dataset?.gsName).filter(Boolean);
-  localStorage.setItem('amux_card_order', JSON.stringify(cardOrder));
-}
-
-function destroyTileGrid() {
-  if (_tileGrid) {
-    try { _tileGrid.destroy(false); } catch(e) {}
-    _tileGrid = null;
-  }
-  const cards = document.querySelector('.cards');
-  if (cards) {
-    cards.classList.remove('gs-tile-active');
-    // Unwrap cards from grid-stack-item wrappers left by destroy(false)
-    cards.querySelectorAll(':scope > .grid-stack-item').forEach(wrapper => {
-      const card = wrapper.querySelector('.card');
-      if (card) cards.insertBefore(card, wrapper);
-      wrapper.remove();
-    });
-  }
 }
 
 function tileMouseDown(e, name) {} // no-op — kept so card HTML doesn't break
