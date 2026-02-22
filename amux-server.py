@@ -258,12 +258,16 @@ def load_session_log(session: str) -> str:
 # When a session runs with --dangerously-skip-permissions, some Claude Code
 # internal safety prompts still require a keypress. We detect and answer them.
 _YOLO_PROMPTS = [
-    # Shell command substitution: "Command contains $() command substitution\nDo you want to proceed?"
-    (re.compile(r'command contains.*command substitution', re.IGNORECASE), '1'),
-    # Generic tool proceed prompt: "Do you want to proceed? ❯ 1. Yes  2. No"
-    (re.compile(r'do you want to proceed', re.IGNORECASE), '1'),
-    # Leaked permission prompt: "Yes, and don't ask again for <cmd>"
-    (re.compile(r'yes.*and don.t ask again', re.IGNORECASE), '1'),
+    # Claude Code internal safety prompts always show "Esc to cancel" UI chrome.
+    # Model-level direction questions never do. We require that marker so we never
+    # auto-answer open-ended questions where the model is asking for user guidance.
+    #
+    # Shell command substitution: "Command contains $() command substitution … Esc to cancel"
+    (re.compile(r'command contains.*command substitution.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
+    # Generic tool proceed prompt: "Do you want to proceed? ❯ 1. Yes … Esc to cancel"
+    (re.compile(r'do you want to proceed.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
+    # Leaked permission prompt: "Yes, and don't ask again … Esc to cancel"
+    (re.compile(r'yes.*and don.t ask again.*esc to cancel', re.IGNORECASE | re.DOTALL), '1'),
 ]
 _YOLO_COOLDOWN = 6  # seconds between auto-responses per session
 _yolo_last_responded: dict = {}
