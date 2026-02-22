@@ -920,7 +920,7 @@ def _scheduler_loop():
                                (now_str, next_r, now_ts, sched["id"]))
             if due:
                 db.commit()
-                _push_board_update()
+
         except Exception as e:
             slog(f"[sched] scheduler loop error: {e}")
 
@@ -5476,7 +5476,7 @@ function slashAcKeydown(e) {
   const el = document.getElementById('slash-ac-list');
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendPeekCmd(); return; }
   if (!el.classList.contains('open')) {
-    if (e.key === 'ArrowUp' && inp.value.indexOf('\n') === -1) { e.preventDefault(); cmdHistoryUp(inp); return; }
+    if (e.key === 'ArrowUp' && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
   }
@@ -5590,7 +5590,7 @@ function cardSlashAcKeydown(name, e) {
   const el = document.getElementById('card-ac-' + name);
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendFromInput(name); return; }
   if (!el || !el.classList.contains('open')) {
-    if (e.key === 'ArrowUp' && inp && inp.value.indexOf('\n') === -1) { e.preventDefault(); cmdHistoryUp(inp); return; }
+    if (e.key === 'ArrowUp' && inp && inp.selectionStart === 0) { e.preventDefault(); cmdHistoryUp(inp); return; }
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
   }
@@ -7003,10 +7003,13 @@ function openSchedModal(editId) {
   updateSchedTypeUI();
   updateSchedRecUI();
   overlay.style.display = 'flex';
+  requestAnimationFrame(() => overlay.classList.add('active'));
   setTimeout(() => document.getElementById('sched-title').focus(), 50);
 }
 function closeSchedModal() {
-  document.getElementById('sched-overlay').style.display = 'none';
+  const overlay = document.getElementById('sched-overlay');
+  overlay.classList.remove('active');
+  setTimeout(() => { overlay.style.display = 'none'; }, 250);
   _schedEditId = null;
 }
 async function saveSchedModal() {
@@ -7932,7 +7935,7 @@ function gpSendKeydown(name, e) {
   } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !e.altKey && !e.shiftKey) {
     const hasSelection = inp && inp.selectionStart !== inp.selectionEnd;
     if (!hasSelection) { e.preventDefault(); gpDoKeys(name, 'C-c'); }
-  } else if (e.key === 'ArrowUp' && inp && inp.value.indexOf('\n') === -1) {
+  } else if (e.key === 'ArrowUp' && inp && inp.selectionStart === 0) {
     e.preventDefault(); cmdHistoryUp(inp);
   } else if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) {
     e.preventDefault(); cmdHistoryDown(inp);
@@ -9729,7 +9732,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 return dict(zip(cols, row))
 
             def _sched_cols(db):
-                return [d[0] for d in db.execute("PRAGMA table_info(schedules)").fetchall()]
+                return [d[1] for d in db.execute("PRAGMA table_info(schedules)").fetchall()]
 
             # GET /api/schedules
             if method == "GET" and path == "/api/schedules":
@@ -9744,9 +9747,9 @@ class CCHandler(BaseHTTPRequestHandler):
             # POST /api/schedules
             if method == "POST" and path == "/api/schedules":
                 db = get_db()
-                data = body_json
+                data = self._read_body()
                 now_ts = int(_time.time())
-                sid = next_id(db, "SCHED")
+                sid = _next_issue_id("SCHED")
                 stype = data.get("sched_type", "once")
                 run_at = data.get("run_at", _dt.now().strftime("%Y-%m-%dT%H:%M"))
                 sched = {
@@ -9771,7 +9774,7 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["created"], sched["updated"], sched["deleted"])
                 )
                 db.commit()
-                _push_board_update()
+
                 self._json(sched, 201)
                 return
 
@@ -9794,9 +9797,10 @@ class CCHandler(BaseHTTPRequestHandler):
                     self._json({"error": "not found"}, 404); return
                 cols = _sched_cols(db)
                 sched = _sched_row_to_dict(row, cols)
+                body = self._read_body()
                 for k in ("title","session","command","sched_type","recurrence","run_at","enabled"):
-                    if k in body_json:
-                        sched[k] = body_json[k]
+                    if k in body:
+                        sched[k] = body[k]
                 sched["next_run"] = _next_run_dt(sched) or sched.get("run_at", "")
                 sched["updated"] = int(_time.time())
                 db.execute(
@@ -9807,7 +9811,7 @@ class CCHandler(BaseHTTPRequestHandler):
                      sched["enabled"], sched["updated"], sched_id)
                 )
                 db.commit()
-                _push_board_update()
+
                 self._json(sched)
                 return
 
@@ -9817,7 +9821,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.execute("UPDATE schedules SET deleted=?,updated=? WHERE id=?",
                            (int(_time.time()), int(_time.time()), sched_id))
                 db.commit()
-                _push_board_update()
+
                 self._json({"deleted": sched_id})
                 return
 
