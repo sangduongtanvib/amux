@@ -2138,8 +2138,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .settings-server-url { font-size: 0.65rem; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .settings-server-badge { font-size: 0.6rem; color: var(--accent); flex-shrink: 0; margin-left: 6px; }
 
+  /* Peek find bar */
+  .peek-find-wrap { position: relative; display: flex; align-items: center; gap: 0; }
+  .peek-find-wrap .search-input { padding-right: 120px; min-width: 180px; }
+  .peek-find-count { position: absolute; right: 60px; font-size: 0.65rem; color: var(--dim); white-space: nowrap; pointer-events: none; }
+  .peek-nav-btn { width: 22px; height: 22px; border: none; background: transparent; color: var(--dim); cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; position: absolute; }
+  .peek-nav-btn:first-of-type { right: 36px; }
+  .peek-nav-btn:last-of-type { right: 16px; }
+  .peek-nav-btn:hover { color: var(--text); }
+  .peek-find-wrap .search-clear { position: absolute; right: 2px; }
+  .peek-find-wrap.has-value .search-clear { display: flex; }
   /* Peek search highlight */
-  .peek-highlight { background: rgba(210,153,34,0.4); color: #fff; border-radius: 2px; }
+  .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
+  .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
 
   /* Peek command bar */
   .peek-cmd-bar { flex-shrink: 0; }
@@ -3061,10 +3072,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span id="peek-session-status"></span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
-      <div class="search-wrap" id="peek-search-wrap">
+      <div class="peek-find-wrap" id="peek-search-wrap">
         <input class="search-input" id="peek-search" type="text" placeholder="Find..." autocomplete="off" autocorrect="off"
-          oninput="peekSearchQuery=this.value;document.getElementById('peek-search-wrap').classList.toggle('has-value',!!this.value);applyPeekSearch()">
-        <span class="search-count" id="peek-search-count"></span>
+          oninput="peekSearchQuery=this.value;document.getElementById('peek-search-wrap').classList.toggle('has-value',!!this.value);applyPeekSearch()"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();event.shiftKey?peekSearchPrev():peekSearchNext();}">
+        <span class="peek-find-count" id="peek-search-count"></span>
+        <button class="peek-nav-btn" onclick="peekSearchPrev()" title="Previous match (Shift+Enter)">&#x2191;</button>
+        <button class="peek-nav-btn" onclick="peekSearchNext()" title="Next match (Enter)">&#x2193;</button>
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
       <button class="btn" id="peek-explore-btn" onclick="openExplore(peekSessionDir)" title="Browse files">&#x1F4C2;</button>
@@ -3309,6 +3323,8 @@ let peekSession = null;
 let peekTimer = null;
 let peekSessionDir = '';
 let peekSearchQuery = '';
+let peekSearchIndex = 0;
+let _peekMatches = [];
 let lastPeekHTML = '';
 const _peekDrafts = {};  // session name → command text
 
@@ -3908,9 +3924,10 @@ function render() {
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
       ${logSearchMode && _logMatches[s.name] ? (() => {
         const hits = _logMatches[s.name];
-        return hits.slice(0, 2).map(h =>
-          `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}')"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
-        ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}')">+${hits.length - 2} more matches</div>` : '');
+        const sq = searchQuery.replace(/'/g,"\\'");
+        return hits.slice(0, 2).map((h, hi) =>
+          `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
+        ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
       ${(isYolo || model || s.tags.length) ? `<div class="badges">
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
@@ -4693,7 +4710,7 @@ async function saveGlobalMemory() {
   }
 }
 
-function openPeek(name) {
+function openPeek(name, opts) {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   clearPeekFiles();  // clear any stale attachments from previous peek
   peekSession = name;
@@ -4704,10 +4721,16 @@ function openPeek(name) {
   document.getElementById('peek-memory-panel').classList.remove('active');
   // Update dir bar
   document.getElementById('peek-dir-text').textContent = peekSessionDir || '(unknown)';
-  peekSearchQuery = '';
+  const prefillQuery = opts && opts.query ? opts.query : '';
+  peekSearchQuery = prefillQuery;
+  peekSearchIndex = 0;
+  _peekMatches = [];
   lastPeekHTML = '';
   const searchInp = document.getElementById('peek-search');
-  if (searchInp) searchInp.value = '';
+  if (searchInp) {
+    searchInp.value = prefillQuery;
+    document.getElementById('peek-search-wrap').classList.toggle('has-value', !!prefillQuery);
+  }
   const draft = _peekDrafts[name] || '';
   const cmdInp = document.getElementById('peek-cmd-input');
   cmdInp.value = draft;
@@ -4916,29 +4939,48 @@ async function refreshPeek() {
   }
 }
 
-function applyPeekSearch() {
+function applyPeekSearch(keepIndex) {
   const body = document.getElementById('peek-body');
   const countEl = document.getElementById('peek-search-count');
   if (!body) return;
   const q = peekSearchQuery.trim();
   if (!q) {
     body.innerHTML = lastPeekHTML;
+    _peekMatches = [];
+    peekSearchIndex = 0;
     if (countEl) countEl.textContent = '';
     return;
   }
-  // Highlight matches in text nodes only (not inside tags)
+  // Highlight all matches in text nodes only (not inside tags)
   const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp('(' + escaped + ')', 'gi');
   const parts = lastPeekHTML.split(/(<[^>]+>)/);
-  let matchCount = 0;
+  let idx = 0;
   body.innerHTML = parts.map(p => {
     if (p.startsWith('<')) return p;
-    return p.replace(re, (match) => { matchCount++; return `<span class="peek-highlight">${esc(match)}</span>`; });
+    return p.replace(re, (match) => `<span class="peek-highlight" data-idx="${idx++}">${esc(match)}</span>`);
   }).join('');
-  if (countEl) countEl.textContent = matchCount > 0 ? matchCount + ' found' : 'no matches';
-  // Scroll to first match
-  const first = body.querySelector('.peek-highlight');
-  if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  _peekMatches = Array.from(body.querySelectorAll('.peek-highlight'));
+  if (!keepIndex || peekSearchIndex >= _peekMatches.length) peekSearchIndex = 0;
+  _peekScrollTo(peekSearchIndex);
+  if (countEl) countEl.textContent = _peekMatches.length > 0 ? (peekSearchIndex + 1) + '/' + _peekMatches.length : 'no matches';
+}
+function _peekScrollTo(i) {
+  _peekMatches.forEach((m, j) => m.classList.toggle('current', j === i));
+  const cur = _peekMatches[i];
+  if (cur) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  const countEl = document.getElementById('peek-search-count');
+  if (countEl && _peekMatches.length) countEl.textContent = (i + 1) + '/' + _peekMatches.length;
+}
+function peekSearchNext() {
+  if (!_peekMatches.length) return;
+  peekSearchIndex = (peekSearchIndex + 1) % _peekMatches.length;
+  _peekScrollTo(peekSearchIndex);
+}
+function peekSearchPrev() {
+  if (!_peekMatches.length) return;
+  peekSearchIndex = (peekSearchIndex - 1 + _peekMatches.length) % _peekMatches.length;
+  _peekScrollTo(peekSearchIndex);
 }
 
 // ── Peek command bar ──
@@ -5389,6 +5431,8 @@ function clearPeekSearch() {
   const inp = document.getElementById('peek-search');
   inp.value = '';
   peekSearchQuery = '';
+  peekSearchIndex = 0;
+  _peekMatches = [];
   document.getElementById('peek-search-wrap').classList.remove('has-value');
   document.getElementById('peek-search-count').textContent = '';
   applyPeekSearch();
