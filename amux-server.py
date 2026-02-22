@@ -2234,6 +2234,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .ac-item:last-child { border-bottom: none; }
   .ac-item:active, .ac-item.selected { background: rgba(88,166,255,0.15); }
+  .at-item .at-at { color: var(--accent); }
 
   /* Search input with clear button */
   .search-wrap {
@@ -5508,6 +5509,48 @@ async function peekQuickKeys(keys) {
   setTimeout(refreshPeek, 500);
 }
 
+// ── @mention helpers ──
+// Returns {q, idx} when cursor is inside an @word, else null
+function _atQuery(inp) {
+  const before = inp.value.slice(0, inp.selectionStart);
+  const atIdx = before.lastIndexOf('@');
+  if (atIdx === -1) return null;
+  const fragment = before.slice(atIdx + 1);
+  if (/\s/.test(fragment)) return null; // space after @ means mention is complete
+  return { q: fragment.toLowerCase(), idx: atIdx };
+}
+
+// Populate dropdown with @session matches; returns true if @ mode active
+function _atRender(inp, el, pickCall) {
+  const at = _atQuery(inp);
+  if (at === null) return false;
+  const matches = (sessions || []).filter(s => s.name.toLowerCase().startsWith(at.q)).slice(0, 8);
+  if (!matches.length) { el.classList.remove('open'); return true; }
+  el.innerHTML = matches.map((s, i) =>
+    `<div class="ac-item at-item" onmousedown="${pickCall}(${i})">` +
+    `<span class="at-at">@</span>${esc(s.name)}` +
+    `<span class="ac-desc">${s.running ? '● running' : '○ stopped'}</span></div>`
+  ).join('');
+  el._atItems = matches;
+  el.classList.add('open');
+  return true;
+}
+
+// Insert @name at the trigger position
+function _atInsert(inp, el) {
+  const at = _atQuery(inp);
+  const items = el._atItems;
+  const sel = el._atSel >= 0 ? el._atSel : 0;
+  if (!at || !items || !items[sel]) return;
+  const name = items[sel].name;
+  const val = inp.value;
+  inp.value = val.slice(0, at.idx) + '@' + name + ' ' + val.slice(inp.selectionStart);
+  const newPos = at.idx + name.length + 2;
+  inp.selectionStart = inp.selectionEnd = newPos;
+  el._atItems = null; el._atSel = -1;
+  el.classList.remove('open');
+}
+
 // ── Slash command autocomplete ──
 const SLASH_COMMANDS = [
   { cmd: '/compact', desc: 'Compact conversation history' },
@@ -5535,6 +5578,9 @@ function slashAcUpdate() {
   const inp = document.getElementById('peek-cmd-input');
   const el = document.getElementById('slash-ac-list');
   const val = inp.value;
+  // @ mention takes priority (cursor-aware)
+  if (_atRender(inp, el, 'slashAcPick')) { slashAcItems = []; slashAcSelected = -1; return; }
+  el._atItems = null; el._atSel = -1;
   if (!val.startsWith('/')) { el.classList.remove('open'); slashAcItems = []; return; }
   const q = val.toLowerCase();
   slashAcItems = SLASH_COMMANDS.filter(c => c.cmd.startsWith(q));
@@ -5548,9 +5594,15 @@ function slashAcUpdate() {
 
 function slashAcPick(i) {
   const inp = document.getElementById('peek-cmd-input');
-  inp.value = slashAcItems[i].cmd;
-  document.getElementById('slash-ac-list').classList.remove('open');
-  slashAcItems = [];
+  const el = document.getElementById('slash-ac-list');
+  if (el._atItems) {
+    el._atSel = i;
+    _atInsert(inp, el);
+  } else {
+    inp.value = slashAcItems[i].cmd;
+    el.classList.remove('open');
+    slashAcItems = [];
+  }
   inp.focus({ preventScroll: true });
 }
 
@@ -5563,30 +5615,37 @@ function slashAcKeydown(e) {
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); cmdHistoryDown(inp); return; }
     return;
   }
+  const atMode = !!el._atItems;
+  const itemLen = atMode ? el._atItems.length : slashAcItems.length;
+  const getSel = () => atMode ? (el._atSel >= 0 ? el._atSel : -1) : slashAcSelected;
+  const setSel = v => { if (atMode) el._atSel = v; else slashAcSelected = v; };
   if (e.key === 'ArrowUp') {
     e.preventDefault();
-    slashAcSelected = slashAcSelected <= 0 ? slashAcItems.length - 1 : slashAcSelected - 1;
+    setSel(getSel() <= 0 ? itemLen - 1 : getSel() - 1);
     slashAcHighlight();
   } else if (e.key === 'ArrowDown') {
     e.preventDefault();
-    slashAcSelected = slashAcSelected >= slashAcItems.length - 1 ? 0 : slashAcSelected + 1;
+    setSel(getSel() >= itemLen - 1 ? 0 : getSel() + 1);
     slashAcHighlight();
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (slashAcSelected >= 0) slashAcPick(slashAcSelected);
-    else { el.classList.remove('open'); }
-  } else if (e.key === 'Tab' && slashAcItems.length) {
+    if (getSel() >= 0) slashAcPick(getSel());
+    else if (atMode) slashAcPick(0);
+    else el.classList.remove('open');
+  } else if (e.key === 'Tab') {
     e.preventDefault();
-    slashAcPick(slashAcSelected >= 0 ? slashAcSelected : 0);
+    slashAcPick(getSel() >= 0 ? getSel() : 0);
   } else if (e.key === 'Escape') {
-    el.classList.remove('open');
+    el.classList.remove('open'); el._atItems = null; el._atSel = -1;
   }
 }
 
 function slashAcHighlight() {
-  const items = document.getElementById('slash-ac-list').querySelectorAll('.ac-item');
-  items.forEach((el, i) => el.classList.toggle('selected', i === slashAcSelected));
-  if (items[slashAcSelected]) items[slashAcSelected].scrollIntoView({ block: 'nearest' });
+  const el = document.getElementById('slash-ac-list');
+  const sel = el._atItems ? el._atSel : slashAcSelected;
+  const items = el.querySelectorAll('.ac-item');
+  items.forEach((item, i) => item.classList.toggle('selected', i === sel));
+  if (items[sel]) items[sel].scrollIntoView({ block: 'nearest' });
 }
 
 // ── Command History (Up/Down arrow navigation in send inputs) ──
@@ -5644,10 +5703,13 @@ function cardSlashAcUpdate(name) {
   // Close any other card's autocomplete
   if (_cardAcName && _cardAcName !== name) {
     const prev = document.getElementById('card-ac-' + _cardAcName);
-    if (prev) prev.classList.remove('open');
+    if (prev) { prev.classList.remove('open'); prev._atItems = null; }
   }
   _cardAcName = name;
   const val = inp.value;
+  // @ mention takes priority (cursor-aware)
+  if (_atRender(inp, el, 'cardAtPick')) { _cardAcItems = []; _cardAcSelected = -1; return; }
+  el._atItems = null; el._atSel = -1;
   if (!val.startsWith('/')) { el.classList.remove('open'); _cardAcItems = []; return; }
   const q = val.toLowerCase();
   _cardAcItems = SLASH_COMMANDS.filter(c => c.cmd.startsWith(q));
@@ -5659,12 +5721,27 @@ function cardSlashAcUpdate(name) {
   el.classList.add('open');
 }
 
+function cardAtPick(i) {
+  const name = _cardAcName;
+  const inp = document.getElementById('input-' + name);
+  const el = document.getElementById('card-ac-' + name);
+  if (!inp || !el) return;
+  el._atSel = i;
+  _atInsert(inp, el);
+  inp.focus({ preventScroll: true });
+}
+
 function cardSlashAcPick(name, i) {
   const inp = document.getElementById('input-' + name);
   const el = document.getElementById('card-ac-' + name);
-  inp.value = _cardAcItems[i].cmd;
-  el.classList.remove('open');
-  _cardAcItems = [];
+  if (el && el._atItems) {
+    el._atSel = i;
+    _atInsert(inp, el);
+  } else {
+    inp.value = _cardAcItems[i].cmd;
+    if (el) el.classList.remove('open');
+    _cardAcItems = [];
+  }
   inp.focus({ preventScroll: true });
 }
 
@@ -5677,30 +5754,37 @@ function cardSlashAcKeydown(name, e) {
     if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) { e.preventDefault(); if (inp) cmdHistoryDown(inp); return; }
     return;
   }
+  const atMode = !!el._atItems;
+  const itemLen = atMode ? el._atItems.length : _cardAcItems.length;
+  const getSel = () => atMode ? (el._atSel >= 0 ? el._atSel : -1) : _cardAcSelected;
+  const setSel = v => { if (atMode) el._atSel = v; else _cardAcSelected = v; };
   if (e.key === 'ArrowUp') {
     e.preventDefault();
-    _cardAcSelected = _cardAcSelected <= 0 ? _cardAcItems.length - 1 : _cardAcSelected - 1;
+    setSel(getSel() <= 0 ? itemLen - 1 : getSel() - 1);
     cardSlashAcHighlight(name);
   } else if (e.key === 'ArrowDown') {
     e.preventDefault();
-    _cardAcSelected = _cardAcSelected >= _cardAcItems.length - 1 ? 0 : _cardAcSelected + 1;
+    setSel(getSel() >= itemLen - 1 ? 0 : getSel() + 1);
     cardSlashAcHighlight(name);
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (_cardAcSelected >= 0) cardSlashAcPick(name, _cardAcSelected);
-    else { el.classList.remove('open'); }
-  } else if (e.key === 'Tab' && _cardAcItems.length) {
+    if (getSel() >= 0) cardSlashAcPick(name, getSel());
+    else if (atMode) cardSlashAcPick(name, 0);
+    else el.classList.remove('open');
+  } else if (e.key === 'Tab') {
     e.preventDefault();
-    cardSlashAcPick(name, _cardAcSelected >= 0 ? _cardAcSelected : 0);
+    cardSlashAcPick(name, getSel() >= 0 ? getSel() : 0);
   } else if (e.key === 'Escape') {
-    el.classList.remove('open');
+    el.classList.remove('open'); el._atItems = null; el._atSel = -1;
   }
 }
 
 function cardSlashAcHighlight(name) {
-  const items = document.getElementById('card-ac-' + name).querySelectorAll('.ac-item');
-  items.forEach((el, i) => el.classList.toggle('selected', i === _cardAcSelected));
-  if (items[_cardAcSelected]) items[_cardAcSelected].scrollIntoView({ block: 'nearest' });
+  const el = document.getElementById('card-ac-' + name);
+  const sel = el && el._atItems ? el._atSel : _cardAcSelected;
+  const items = el ? el.querySelectorAll('.ac-item') : [];
+  items.forEach((item, i) => item.classList.toggle('selected', i === sel));
+  if (items[sel]) items[sel].scrollIntoView({ block: 'nearest' });
 }
 
 // ── Search clear helpers ──
@@ -6260,10 +6344,10 @@ document.addEventListener('click', e => {
   if (!e.target.closest('.ac-wrap')) {
     document.getElementById('ac-list').classList.remove('open');
   }
-  // Close card slash autocomplete
+  // Close card slash/@ autocomplete
   if (!e.target.closest('.send-row') && _cardAcName) {
     const el = document.getElementById('card-ac-' + _cardAcName);
-    if (el) el.classList.remove('open');
+    if (el) { el.classList.remove('open'); el._atItems = null; el._atSel = -1; }
     _cardAcItems = [];
   }
 });
