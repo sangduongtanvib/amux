@@ -49,6 +49,15 @@ UPLOAD_ALLOWED_EXTS = {
 }
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
+
+# S3 iCal public sync (optional — set AMUX_S3_BUCKET to enable)
+_S3_BUCKET = os.environ.get("AMUX_S3_BUCKET", "")
+_S3_KEY = os.environ.get("AMUX_S3_KEY", "amux/calendar.ics")
+_S3_REGION = os.environ.get("AMUX_S3_REGION", "us-east-1")
+_S3_CAL_URL = (
+    f"https://{_S3_BUCKET}.s3.{_S3_REGION}.amazonaws.com/{_S3_KEY}"
+    if _S3_BUCKET else ""
+)
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 SERVER_LOG = CC_LOGS / "server.log"
 _server_log_lock = threading.Lock()
@@ -500,6 +509,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session);
+CREATE TABLE IF NOT EXISTS schedules (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    session     TEXT NOT NULL,
+    command     TEXT NOT NULL,
+    sched_type  TEXT NOT NULL DEFAULT 'once',
+    recurrence  TEXT,
+    run_at      TEXT,
+    next_run    TEXT,
+    last_run    TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created     INTEGER NOT NULL,
+    updated     INTEGER NOT NULL,
+    deleted     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(next_run) WHERE deleted IS NULL AND enabled=1;
 """
 
 
@@ -727,6 +752,172 @@ def _next_issue_id(prefix: str) -> str:
     ).fetchone()
     db.commit()
     return f"{prefix}-{row[0] if row else 1}"
+
+
+def _generate_ical() -> str:
+    """Generate iCal text from board items that have due dates."""
+    items = [i for i in _load_board() if i.get("due")]
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//amux//amux calendar//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:amux Board",
+        "X-WR-CALDESC:amux board items with due dates",
+        "REFRESH-INTERVAL;VALUE=DURATION:PT15M",
+        "X-PUBLISHED-TTL:PT15M",
+    ]
+    status_map = {"todo": "NEEDS-ACTION", "doing": "IN-PROCESS", "done": "COMPLETED"}
+    for item in items:
+        due = item["due"]
+        date_val = due.replace("-", "")
+        uid = item["id"] + "@amux"
+        summary = item.get("title", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+        desc = item.get("desc", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+        vstatus = status_map.get(item.get("status", "todo"), "NEEDS-ACTION")
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTART;VALUE=DATE:{date_val}",
+            f"DTEND;VALUE=DATE:{date_val}",
+            f"SUMMARY:{summary}",
+            f"DESCRIPTION:{desc}",
+            f"STATUS:{vstatus}",
+            "END:VEVENT",
+        ]
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _upload_ical_to_s3():
+    """Upload the iCal feed to a public S3 bucket (if configured)."""
+    if not _S3_BUCKET:
+        return
+    try:
+        import boto3
+        ical = _generate_ical()
+        s3 = boto3.client("s3", region_name=_S3_REGION)
+        s3.put_object(
+            Bucket=_S3_BUCKET,
+            Key=_S3_KEY,
+            Body=ical.encode("utf-8"),
+            ContentType="text/calendar; charset=utf-8",
+            CacheControl="no-cache, max-age=0",
+        )
+        slog(f"iCal uploaded to s3://{_S3_BUCKET}/{_S3_KEY}")
+    except Exception as e:
+        slog(f"S3 iCal upload failed: {e}")
+
+
+
+def _next_run_dt(sched):
+    """Compute next run datetime for a schedule. Returns ISO string or None."""
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    stype = sched.get("sched_type", "once")
+    if stype == "once":
+        return sched.get("run_at")
+    rec = sched.get("recurrence", "daily")
+    run_at = sched.get("run_at") or now.strftime("%H:%M")
+    # parse time portion
+    try:
+        t = datetime.strptime(run_at[-5:], "%H:%M")
+        hour, minute = t.hour, t.minute
+    except Exception:
+        hour, minute = 9, 0
+    base = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if rec == "hourly":
+        base = now.replace(minute=minute, second=0, microsecond=0)
+        if base <= now:
+            base += timedelta(hours=1)
+    elif rec == "daily":
+        if base <= now:
+            base += timedelta(days=1)
+    elif rec == "weekly":
+        # run_at encodes weekday as first char: "1:09:00" = Monday 09:00
+        try:
+            parts = run_at.split(":", 1)
+            wd = int(parts[0])  # 0=Mon, 6=Sun
+            time_str = parts[1] if len(parts) > 1 else "09:00"
+            tt = datetime.strptime(time_str, "%H:%M")
+            base = now.replace(hour=tt.hour, minute=tt.minute, second=0, microsecond=0)
+            days_ahead = (wd - now.weekday()) % 7
+            if days_ahead == 0 and base <= now:
+                days_ahead = 7
+            base += timedelta(days=days_ahead)
+        except Exception:
+            if base <= now:
+                base += timedelta(weeks=1)
+    elif rec == "monthly":
+        # run_at encodes day: "15:09:00" = 15th at 09:00
+        try:
+            parts = run_at.split(":", 1)
+            mday = int(parts[0])
+            time_str = parts[1] if len(parts) > 1 else "09:00"
+            tt = datetime.strptime(time_str, "%H:%M")
+            base = now.replace(day=min(mday, 28), hour=tt.hour, minute=tt.minute, second=0, microsecond=0)
+            if base <= now:
+                # next month
+                m = (now.month % 12) + 1
+                y = now.year + (1 if now.month == 12 else 0)
+                base = base.replace(year=y, month=m)
+        except Exception:
+            if base <= now:
+                import calendar as _cal
+                _, last = _cal.monthrange(now.year, now.month)
+                base += timedelta(days=last)
+    return base.strftime("%Y-%m-%dT%H:%M")
+
+
+def _run_schedule(sched):
+    """Execute a schedule entry — send command to tmux session."""
+    import subprocess
+    session = sched["session"]
+    command = sched["command"]
+    slog(f"[sched] running '{sched['title']}' on session '{session}'")
+    try:
+        subprocess.run(["tmux", "send-keys", "-t", session, command, "Enter"],
+                       capture_output=True, timeout=5)
+    except Exception as e:
+        slog(f"[sched] error running '{sched['title']}': {e}")
+
+
+def _scheduler_loop():
+    """Background thread — checks and fires due schedules every 30 seconds."""
+    import time
+    from datetime import datetime
+    while True:
+        time.sleep(30)
+        try:
+            now_str = datetime.now().strftime("%Y-%m-%dT%H:%M")
+            db = get_db()
+            due = db.execute(
+                "SELECT * FROM schedules WHERE deleted IS NULL AND enabled=1 AND next_run <= ?",
+                (now_str,)
+            ).fetchall()
+            cols = [d[0] for d in db.execute("SELECT * FROM schedules LIMIT 0").description]
+            for row in due:
+                sched = dict(zip(cols, row))
+                _run_schedule(sched)
+                now_ts = int(time.time())
+                if sched["sched_type"] == "once":
+                    db.execute("UPDATE schedules SET enabled=0, last_run=?, updated=? WHERE id=?",
+                               (now_str, now_ts, sched["id"]))
+                else:
+                    next_r = _next_run_dt(sched)
+                    db.execute("UPDATE schedules SET last_run=?, next_run=?, updated=? WHERE id=?",
+                               (now_str, next_r, now_ts, sched["id"]))
+            if due:
+                db.commit()
+                _push_board_update()
+        except Exception as e:
+            slog(f"[sched] scheduler loop error: {e}")
+
+def _push_ical_bg():
+    """Trigger S3 iCal upload in a background thread."""
+    if _S3_BUCKET:
+        threading.Thread(target=_upload_ical_to_s3, daemon=True).start()
 
 
 def get_daily_token_stats() -> dict:
@@ -1794,6 +1985,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .cal-cell.today .cal-cell-num { background: var(--accent); color: #fff; font-weight: 700; }
   .cal-chip { font-size: 0.66rem; line-height: 1.25; padding: 2px 4px; border-radius: 3px; margin-bottom: 2px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block; }
   .cal-chip:active { opacity: 0.7; }
+  .cal-chip.sched-chip { background: rgba(163,113,247,0.18); color: #c084fc; border-left: 2px solid #c084fc; }
   .cal-more { font-size: 0.62rem; color: var(--dim); padding-left: 2px; }
   .cal-dots { display: none; gap: 3px; flex-wrap: wrap; padding: 3px 1px 0; }
   .cal-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
@@ -2954,9 +3146,71 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="cal-view-tab" id="cal-tab-day" onclick="calSetView('day')">Day</button>
       </div>
       <button class="btn" onclick="showIcalInfo()" title="Subscribe in Google / Apple Calendar" style="font-size:0.8rem;">&#x1F4C5;</button>
+      <button class="btn" onclick="openSchedModal()" title="New scheduled task" style="font-size:0.8rem;">&#x23F0; Schedule</button>
     </div>
   </div>
   <div id="cal-body"></div>
+</div>
+
+<!-- Schedule modal -->
+<div id="sched-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeSchedModal()" style="display:none;">
+  <div class="board-edit-box" style="max-width:420px;">
+    <div style="font-weight:600;font-size:0.9rem;margin-bottom:10px;">&#x23F0; Scheduled Task</div>
+    <div class="field-group">
+      <label class="field-label">Title</label>
+      <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
+    </div>
+    <div class="field-group">
+      <label class="field-label">Session</label>
+      <select id="sched-session" class="board-detail-session-select" style="width:100%;"></select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">Command</label>
+      <input id="sched-command" type="text" placeholder="e.g. /status or npm run build" autocomplete="off">
+    </div>
+    <div class="field-group">
+      <label class="field-label">Schedule</label>
+      <select id="sched-type" class="board-detail-session-select" style="width:100%;" onchange="updateSchedTypeUI()">
+        <option value="once">Once</option>
+        <option value="recurring">Recurring</option>
+      </select>
+    </div>
+    <div id="sched-once-fields" class="field-group">
+      <label class="field-label">Run at</label>
+      <input id="sched-run-at" type="datetime-local" class="board-detail-session-select" style="width:100%;">
+    </div>
+    <div id="sched-rec-fields" style="display:none;">
+      <div class="field-group">
+        <label class="field-label">Repeat</label>
+        <select id="sched-recurrence" class="board-detail-session-select" style="width:100%;" onchange="updateSchedRecUI()">
+          <option value="hourly">Hourly</option>
+          <option value="daily" selected>Daily</option>
+          <option value="weekly">Weekly</option>
+          <option value="monthly">Monthly</option>
+        </select>
+      </div>
+      <div class="field-group" id="sched-time-field">
+        <label class="field-label">Time</label>
+        <input id="sched-time" type="time" class="board-detail-session-select" style="width:100%;" value="09:00">
+      </div>
+      <div class="field-group" id="sched-weekday-field" style="display:none;">
+        <label class="field-label">Day of week</label>
+        <select id="sched-weekday" class="board-detail-session-select" style="width:100%;">
+          <option value="0">Monday</option><option value="1">Tuesday</option>
+          <option value="2">Wednesday</option><option value="3">Thursday</option>
+          <option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option>
+        </select>
+      </div>
+      <div class="field-group" id="sched-monthday-field" style="display:none;">
+        <label class="field-label">Day of month</label>
+        <input id="sched-monthday" type="number" min="1" max="28" value="1" class="board-detail-session-select" style="width:100%;">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+      <button class="btn" onclick="closeSchedModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSchedModal()" id="sched-save-btn">Save</button>
+    </div>
+  </div>
 </div>
 
 <!-- Board card "add" small modal -->
@@ -6197,6 +6451,8 @@ let boardItems = [];
 let boardStatuses = [{id:'backlog',label:'Backlog'},{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'},{id:'discarded',label:'Discarded'}];
 let _boardSortables = [];
 let boardTimer = null;
+let schedules = [];
+let _schedEditId = null;
 let boardEditId = null;
 let boardEditStatus = 'todo';
 let lastBoardJSON = '';
@@ -6246,10 +6502,17 @@ function switchView(view) {
     // Only poll if SSE is not active (SSE pushes board updates)
     if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
   } else if (view === 'calendar') {
-    fetchBoard().then(() => renderCalendar());
+    Promise.all([fetchBoard(), fetchSchedules()]).then(() => renderCalendar());
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
+}
+
+async function fetchSchedules() {
+  try {
+    const r = await fetch(API + '/api/schedules');
+    if (r.ok) { schedules = await r.json(); }
+  } catch(e) {}
 }
 
 async function fetchBoard() {
@@ -6691,6 +6954,90 @@ function _populateSessionSelect(selectId, current) {
   if (current) sel.value = current;
 }
 
+// ── Schedule modal ────────────────────────────────────────────────────────────
+function updateSchedTypeUI() {
+  const t = document.getElementById('sched-type').value;
+  document.getElementById('sched-once-fields').style.display = t === 'once' ? '' : 'none';
+  document.getElementById('sched-rec-fields').style.display = t === 'recurring' ? '' : 'none';
+}
+function updateSchedRecUI() {
+  const rec = document.getElementById('sched-recurrence').value;
+  document.getElementById('sched-weekday-field').style.display = rec === 'weekly' ? '' : 'none';
+  document.getElementById('sched-monthday-field').style.display = rec === 'monthly' ? '' : 'none';
+  document.getElementById('sched-time-field').style.display = rec === 'hourly' ? 'none' : '';
+}
+function openSchedModal(editId) {
+  _schedEditId = editId || null;
+  const overlay = document.getElementById('sched-overlay');
+  // Populate session list
+  const sel = document.getElementById('sched-session');
+  sel.innerHTML = (sessions || []).map(s => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+  if (editId) {
+    const s = schedules.find(x => x.id === editId);
+    if (s) {
+      document.getElementById('sched-title').value = s.title;
+      sel.value = s.session;
+      document.getElementById('sched-command').value = s.command;
+      document.getElementById('sched-type').value = s.sched_type;
+      document.getElementById('sched-run-at').value = s.run_at || '';
+      if (s.recurrence) document.getElementById('sched-recurrence').value = s.recurrence;
+    }
+    document.getElementById('sched-save-btn').textContent = 'Update';
+  } else {
+    document.getElementById('sched-title').value = '';
+    document.getElementById('sched-command').value = '';
+    document.getElementById('sched-type').value = 'once';
+    document.getElementById('sched-run-at').value = new Date(Date.now() + 3600000).toISOString().slice(0,16);
+    document.getElementById('sched-save-btn').textContent = 'Save';
+  }
+  updateSchedTypeUI();
+  updateSchedRecUI();
+  overlay.style.display = 'flex';
+  setTimeout(() => document.getElementById('sched-title').focus(), 50);
+}
+function closeSchedModal() {
+  document.getElementById('sched-overlay').style.display = 'none';
+  _schedEditId = null;
+}
+async function saveSchedModal() {
+  const title = document.getElementById('sched-title').value.trim();
+  const session = document.getElementById('sched-session').value;
+  const command = document.getElementById('sched-command').value.trim();
+  const stype = document.getElementById('sched-type').value;
+  if (!title || !session || !command) return;
+  let run_at, recurrence;
+  if (stype === 'once') {
+    run_at = document.getElementById('sched-run-at').value;
+  } else {
+    recurrence = document.getElementById('sched-recurrence').value;
+    const time = document.getElementById('sched-time').value || '09:00';
+    if (recurrence === 'weekly') {
+      const wd = document.getElementById('sched-weekday').value;
+      run_at = wd + ':' + time;
+    } else if (recurrence === 'monthly') {
+      const md = document.getElementById('sched-monthday').value || '1';
+      run_at = md + ':' + time;
+    } else {
+      run_at = time;
+    }
+  }
+  const payload = { title, session, command, sched_type: stype, recurrence: recurrence || null, run_at };
+  const url = _schedEditId ? API + '/api/schedules/' + _schedEditId : API + '/api/schedules';
+  const method = _schedEditId ? 'PATCH' : 'POST';
+  const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  if (r.ok) {
+    await fetchSchedules();
+    renderCalendar();
+    closeSchedModal();
+  }
+}
+async function deleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  await fetch(API + '/api/schedules/' + id, { method: 'DELETE' });
+  await fetchSchedules();
+  renderCalendar();
+}
+
 function openBoardAdd(statusOrDate, prefillDate) {
   // statusOrDate: can be a status string or a YYYY-MM-DD date (from calendar cell click)
   let status = 'backlog', dueDate = prefillDate || '';
@@ -7082,27 +7429,38 @@ function calSelectDay(y, m, d) {
 }
 
 function showIcalInfo() {
+  const s3Url = window._AMUX_S3_ICAL_URL || '';
   const origin = window.location.origin;
-  const icalUrl = origin + '/api/calendar.ics';
+  const localUrl = origin + '/api/calendar.ics';
   const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
+  // Prefer S3 URL for subscriptions (publicly reachable); fall back to local
+  const subUrl = s3Url || localUrl;
   const googleUrl = 'https://calendar.google.com/calendar/r/settings/addbyurl?' +
-    'url=' + encodeURIComponent(icalUrl);
-  const appleUrl = 'webcal://' + window.location.host + '/api/calendar.ics';
+    'url=' + encodeURIComponent(subUrl);
+  const appleUrl = s3Url ? ('webcal://' + s3Url.replace(/^https?:\/\//, '')) :
+    ('webcal://' + window.location.host + '/api/calendar.ics');
+
+  function ical_url_esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
   let html = '<div style="font-size:0.9rem;line-height:1.7;">';
   html += '<p style="margin-bottom:0.8rem;font-weight:600;">Subscribe to amux calendar</p>';
 
-  if (isLocal) {
+  if (s3Url) {
+    html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Subscription URL (public S3):</p>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(s3Url) + '</code>';
+    html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
+    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
+    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
+    html += '</div>';
+  } else if (isLocal) {
     html += '<p style="margin-bottom:0.8rem;color:var(--muted);font-size:0.82rem;">⚠️ You\'re on localhost — Google and Apple Calendar can\'t reach this URL directly.</p>';
-    html += '<p style="margin-bottom:0.8rem;font-size:0.82rem;">To subscribe from Google or Apple Calendar, expose the feed via <strong>Tailscale Funnel</strong> on your cloud instance:</p>';
-    html += '<code style="display:block;background:var(--card-bg);padding:0.6rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:0.8rem;word-break:break-all;">ssh root@amux-cloud.tail5ce8f5.ts.net "tailscale funnel --bg 8822"</code>';
-    html += '<p style="font-size:0.82rem;margin-bottom:0.8rem;">Then subscribe to:<br><code style="font-size:0.8rem;">https://amux-cloud.tail5ce8f5.ts.net/api/calendar.ics</code></p>';
+    html += '<p style="margin-bottom:0.8rem;font-size:0.82rem;">Set <code>AMUX_S3_BUCKET</code> to enable a publicly reachable subscription URL via S3.</p>';
   } else {
     html += '<p style="margin-bottom:0.6rem;font-size:0.82rem;">Feed URL:</p>';
-    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(icalUrl) + '</code>';
+    html += '<code style="display:block;background:var(--card-bg);padding:0.5rem 0.8rem;border-radius:6px;font-size:0.78rem;margin-bottom:1rem;word-break:break-all;">' + ical_url_esc(localUrl) + '</code>';
     html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
-    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Open in Google Calendar</a>';
-    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Open in Apple Calendar</a>';
+    html += '<a href="' + googleUrl + '" target="_blank" class="btn" style="font-size:0.8rem;">Add to Google Calendar</a>';
+    html += '<a href="' + appleUrl + '" class="btn" style="font-size:0.8rem;">Add to Apple Calendar</a>';
     html += '</div>';
   }
 
@@ -7110,8 +7468,6 @@ function showIcalInfo() {
   html += '<hr style="margin:0.9rem 0;border:none;border-top:1px solid var(--border);">';
   html += '<a href="/api/calendar.ics" download="amux.ics" class="btn" style="font-size:0.8rem;">&#x2193; Download .ics file</a>';
   html += '</div>';
-
-  function ical_url_esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
 
   // Reuse the board-edit overlay for a simple modal
   const overlay = document.getElementById('board-edit-overlay');
@@ -7146,6 +7502,16 @@ function _calItemsByDate() {
     if (item.due && !item.deleted) {
       if (!map[item.due]) map[item.due] = [];
       map[item.due].push(item);
+    }
+  });
+  (schedules || []).forEach(s => {
+    if (!s.deleted && s.enabled && s.next_run) {
+      const dateStr = s.next_run.slice(0, 10);
+      if (!map[dateStr]) map[dateStr] = [];
+      const time = s.next_run.slice(11, 16);
+      map[dateStr].push({ ...s, _isSched: true, due: dateStr,
+        title: '⏰ ' + s.title + (time ? ' ' + time : ''),
+        status: 'sched' });
     }
   });
   return map;
@@ -7209,10 +7575,16 @@ function _renderCalMonth(titleEl, bodyEl) {
       }
     } else {
       items.slice(0, 3).forEach(item => {
-        const sty = statusStyle(item.status || 'todo');
-        html += '<div class="cal-chip" style="background:' + sty.bg + ';color:' + sty.color + '"'
-              + ' onclick="event.stopPropagation();openBoardDetail(\'' + item.id + '\')"'
-              + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
+        if (item._isSched) {
+          html += '<div class="cal-chip sched-chip"'
+                + ' onclick="event.stopPropagation();openSchedModal(\'' + item.id + '\')"'
+                + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
+        } else {
+          const sty = statusStyle(item.status || 'todo');
+          html += '<div class="cal-chip" style="background:' + sty.bg + ';color:' + sty.color + '"'
+                + ' onclick="event.stopPropagation();openBoardDetail(\'' + item.id + '\')"'
+                + ' title="' + esc(item.title) + '">' + esc(item.title) + '</div>';
+        }
       });
       if (items.length > 3) html += '<div class="cal-more">+' + (items.length - 3) + ' more</div>';
     }
@@ -8819,7 +9191,13 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /
         if method == "GET" and path == "/":
-            return self._html(DASHBOARD_HTML)
+            import json as _json
+            page = DASHBOARD_HTML.replace(
+                "</head>",
+                f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};</script></head>',
+                1,
+            )
+            return self._html(page)
 
         # GET /clear — unregister SW + wipe caches, then redirect to /
         if method == "GET" and path == "/clear":
@@ -9164,6 +9542,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 db.commit()
                 _sse_cache["board"]["time"] = 0  # invalidate SSE cache
                 item = _item_by_id(item_id)
+                _push_ical_bg()
                 return self._json(item, 201)
 
             # POST /api/board/clear-done — soft-delete all done issues
@@ -9177,6 +9556,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 remaining = db.execute(
                     "SELECT COUNT(*) FROM issues WHERE deleted IS NULL"
                 ).fetchone()[0]
+                _push_ical_bg()
                 return self._json({"ok": True, "remaining": remaining})
 
             # GET /api/board/statuses
@@ -9301,6 +9681,7 @@ class CCHandler(BaseHTTPRequestHandler):
                                 )
                     db.commit()
                     _sse_cache["board"]["time"] = 0
+                    _push_ical_bg()
                     return self._json(_item_by_id(bid))
 
                 if method == "DELETE":
@@ -9308,6 +9689,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     db.execute("UPDATE issues SET deleted = ? WHERE id = ?", (now, bid))
                     db.commit()
                     _sse_cache["board"]["time"] = 0
+                    _push_ical_bg()
                     return self._json({"ok": True, "deleted": bid})
 
             return self._json({"error": "not found"}, 404)
@@ -9327,43 +9709,119 @@ class CCHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+
+        # ── Schedules API ─────────────────────────────────────────────────────
+        if path == "/api/schedules" or path.startswith("/api/schedules/"):
+            import time as _time
+            from datetime import datetime as _dt
+
+            def _sched_row_to_dict(row, cols):
+                return dict(zip(cols, row))
+
+            def _sched_cols(db):
+                return [d[0] for d in db.execute("PRAGMA table_info(schedules)").fetchall()]
+
+            # GET /api/schedules
+            if method == "GET" and path == "/api/schedules":
+                db = get_db()
+                rows = db.execute(
+                    "SELECT * FROM schedules WHERE deleted IS NULL ORDER BY next_run ASC, created ASC"
+                ).fetchall()
+                cols = _sched_cols(db)
+                self._json([_sched_row_to_dict(r, cols) for r in rows])
+                return
+
+            # POST /api/schedules
+            if method == "POST" and path == "/api/schedules":
+                db = get_db()
+                data = body_json
+                now_ts = int(_time.time())
+                sid = next_id(db, "SCHED")
+                stype = data.get("sched_type", "once")
+                run_at = data.get("run_at", _dt.now().strftime("%Y-%m-%dT%H:%M"))
+                sched = {
+                    "id": sid, "title": data.get("title", ""),
+                    "session": data.get("session", ""),
+                    "command": data.get("command", ""),
+                    "sched_type": stype,
+                    "recurrence": data.get("recurrence"),
+                    "run_at": run_at, "next_run": run_at,
+                    "last_run": None, "enabled": 1,
+                    "created": now_ts, "updated": now_ts, "deleted": None,
+                }
+                # compute next_run
+                sched["next_run"] = _next_run_dt(sched) or run_at
+                db.execute(
+                    """INSERT INTO schedules (id,title,session,command,sched_type,recurrence,
+                       run_at,next_run,last_run,enabled,created,updated,deleted)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (sched["id"], sched["title"], sched["session"], sched["command"],
+                     sched["sched_type"], sched["recurrence"], sched["run_at"],
+                     sched["next_run"], sched["last_run"], sched["enabled"],
+                     sched["created"], sched["updated"], sched["deleted"])
+                )
+                db.commit()
+                _push_board_update()
+                self._json(sched, 201)
+                return
+
+            sched_id = path.split("/api/schedules/", 1)[-1].split("?")[0]
+
+            # GET /api/schedules/<id>
+            if method == "GET":
+                db = get_db()
+                row = db.execute("SELECT * FROM schedules WHERE id=?", (sched_id,)).fetchone()
+                if not row:
+                    self._json({"error": "not found"}, 404); return
+                self._json(_sched_row_to_dict(row, _sched_cols(db)))
+                return
+
+            # PATCH /api/schedules/<id>
+            if method == "PATCH":
+                db = get_db()
+                row = db.execute("SELECT * FROM schedules WHERE id=?", (sched_id,)).fetchone()
+                if not row:
+                    self._json({"error": "not found"}, 404); return
+                cols = _sched_cols(db)
+                sched = _sched_row_to_dict(row, cols)
+                for k in ("title","session","command","sched_type","recurrence","run_at","enabled"):
+                    if k in body_json:
+                        sched[k] = body_json[k]
+                sched["next_run"] = _next_run_dt(sched) or sched.get("run_at", "")
+                sched["updated"] = int(_time.time())
+                db.execute(
+                    """UPDATE schedules SET title=?,session=?,command=?,sched_type=?,recurrence=?,
+                       run_at=?,next_run=?,enabled=?,updated=? WHERE id=?""",
+                    (sched["title"], sched["session"], sched["command"], sched["sched_type"],
+                     sched["recurrence"], sched["run_at"], sched["next_run"],
+                     sched["enabled"], sched["updated"], sched_id)
+                )
+                db.commit()
+                _push_board_update()
+                self._json(sched)
+                return
+
+            # DELETE /api/schedules/<id>
+            if method == "DELETE":
+                db = get_db()
+                db.execute("UPDATE schedules SET deleted=?,updated=? WHERE id=?",
+                           (int(_time.time()), int(_time.time()), sched_id))
+                db.commit()
+                _push_board_update()
+                self._json({"deleted": sched_id})
+                return
+
         # GET /api/calendar.ics — iCal subscription feed
         if method == "GET" and path == "/api/calendar.ics":
-            items = [i for i in _load_board() if i.get("due")]
-            lines = [
-                "BEGIN:VCALENDAR",
-                "VERSION:2.0",
-                "PRODID:-//amux//amux calendar//EN",
-                "CALSCALE:GREGORIAN",
-                "METHOD:PUBLISH",
-                "X-WR-CALNAME:amux Board",
-                "X-WR-CALDESC:amux board items with due dates",
-            ]
-            status_map = {"todo": "NEEDS-ACTION", "doing": "IN-PROCESS", "done": "COMPLETED"}
-            for item in items:
-                due = item["due"]  # YYYY-MM-DD
-                date_val = due.replace("-", "")
-                uid = item["id"] + "@amux"
-                summary = item.get("title", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
-                desc = item.get("desc", "").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
-                vstatus = status_map.get(item.get("status", "todo"), "NEEDS-ACTION")
-                lines += [
-                    "BEGIN:VEVENT",
-                    f"UID:{uid}",
-                    f"DTSTART;VALUE=DATE:{date_val}",
-                    f"DTEND;VALUE=DATE:{date_val}",
-                    f"SUMMARY:{summary}",
-                    f"DESCRIPTION:{desc}",
-                    f"STATUS:{vstatus}",
-                    "END:VEVENT",
-                ]
-            lines.append("END:VCALENDAR")
-            ical_text = "\r\n".join(lines) + "\r\n"
+            ical_text = _generate_ical()
+            body = ical_text.encode("utf-8")
             self.send_response(200)
+            self._cors()
             self.send_header("Content-Type", "text/calendar; charset=utf-8")
-            self.send_header("Content-Disposition", 'attachment; filename="amux.ics"')
+            self.send_header("Content-Disposition", 'inline; filename="amux.ics"')
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(ical_text.encode("utf-8"))
+            self.wfile.write(body)
             return
 
         # GET /api/sync?since=<unix_seconds> — delta sync for offline clients
@@ -10042,6 +10500,8 @@ def main():
     threading.Thread(target=_yolo_loop, daemon=True).start()
     # Initial snapshot immediately
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
+    # Start schedule runner thread
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
 
     try:
         server.serve_forever()
