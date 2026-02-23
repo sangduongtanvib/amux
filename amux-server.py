@@ -1925,7 +1925,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip:active { background: rgba(88,166,255,0.25); }
   .chip.danger { background: rgba(248,81,73,0.12); color: var(--red); border-color: rgba(248,81,73,0.25); }
   .chip.danger:active { background: rgba(248,81,73,0.25); }
-  .send-row { display: flex; gap: 8px; min-width: 0; overflow: hidden; }
+  .send-row { display: flex; gap: 8px; min-width: 0; overflow: visible; position: relative; }
   .send-input {
     flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
