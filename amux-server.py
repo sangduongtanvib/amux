@@ -2815,14 +2815,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Tab bar */
   .tab-bar {
-    display: flex; gap: 0; margin: 0 -16px 12px -16px; padding: 0 16px;
+    display: flex; gap: 0; margin: 0 0 12px 0; padding: 0;
     border-bottom: 1px solid var(--border);
     position: sticky; top: 60px; z-index: 39; background: var(--bg);
     overflow-x: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth;
   }
   .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
-    flex: none; padding: 10px 14px; font-size: 0.85rem; font-weight: 600;
+    flex: none; padding: 10px 12px; font-size: 0.85rem; font-weight: 600;
     background: none; border: none; border-bottom: 2px solid transparent;
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
