@@ -3,7 +3,7 @@
  *
  * DESKTOP (1280×800) flows covered:
  *   Sessions tab:
- *     - Page loads with title and 3 tabs
+ *     - Page loads with title and tabs (sessions/board/calendar/reports/notifications)
  *     - Session cards render with name + status dot
  *     - Running session has .running dot
  *     - Session card expands on click, shows detail rows
@@ -61,7 +61,7 @@
  *
  * MOBILE (iPhone 14, 390×844) flows covered:
  *   - Tab bar visible and sticky (.tab-bar)
- *   - All 3 tab buttons present
+ *   - All core tab buttons present (≥5: sessions/board/calendar/reports/notifications)
  *   - Sessions render as .card elements
  *   - Board: switch to kanban, ≥3 columns
  *   - Board: horizontal scroll enabled (overflow-x: scroll)
@@ -539,9 +539,10 @@ async function runMobile(browser) {
 
   const tabs = await page.$$('.tab-bar button');
   // Grid tab is desktop-only (display:none on mobile) but still in DOM
+  // Core tabs: sessions, board, calendar, reports, notifications = 5
   const visibleTabs = await Promise.all(tabs.map(t => t.isVisible()));
   const visibleTabCount = visibleTabs.filter(Boolean).length;
-  log('All 3 tab buttons present on mobile', visibleTabCount === 3, `${tabs.length} tabs`);
+  log('Core tab buttons present on mobile', visibleTabCount >= 5, `${tabs.length} tabs`);
 
   // Tab bar is sticky — check it has a position style or top set
   const tabTop = await tabBar?.evaluate(el => getComputedStyle(el).position);

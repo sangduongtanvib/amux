@@ -2779,12 +2779,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; gap: 0; margin: 0 -16px 12px -16px; padding: 0 16px;
     border-bottom: 1px solid var(--border);
     position: sticky; top: 60px; z-index: 39; background: var(--bg);
+    overflow-x: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth;
   }
+  .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
-    flex: 1; padding: 10px 0; font-size: 0.85rem; font-weight: 600;
+    flex: none; padding: 10px 14px; font-size: 0.85rem; font-weight: 600;
     background: none; border: none; border-bottom: 2px solid transparent;
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
-    -webkit-tap-highlight-color: transparent;
+    -webkit-tap-highlight-color: transparent; white-space: nowrap;
   }
   .tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-bar button:active { opacity: 0.7; }
@@ -3214,6 +3216,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
+  <button id="tab-reports" onclick="switchView('reports')">Reports</button>
+  <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
 </div>
 <div id="session-view">
@@ -3278,6 +3282,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div id="cal-body"></div>
+</div>
+
+<!-- Reports view -->
+<div id="reports-view" style="display:none;">
+  <div class="empty-state" style="padding:48px 16px;text-align:center;">
+    <div style="font-size:2rem;margin-bottom:12px;">📊</div>
+    <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Reports</div>
+    <div style="color:var(--dim);font-size:0.85rem;">Spend, usage, and metrics from external sources will appear here.</div>
+  </div>
+</div>
+
+<!-- Notifications view -->
+<div id="notifications-view" style="display:none;">
+  <div class="empty-state" style="padding:48px 16px;text-align:center;">
+    <div style="font-size:2rem;margin-bottom:12px;">🔔</div>
+    <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Notifications</div>
+    <div style="color:var(--dim);font-size:0.85rem;">Due date reminders, spend alerts, and agent updates will appear here.</div>
+  </div>
 </div>
 
 <!-- Schedule modal -->
@@ -6730,9 +6752,13 @@ function switchView(view) {
   document.getElementById('session-view').style.display = view === 'sessions' ? '' : 'none';
   document.getElementById('board-view').style.display = view === 'board' ? '' : 'none';
   document.getElementById('calendar-view').style.display = view === 'calendar' ? '' : 'none';
+  document.getElementById('reports-view').style.display = view === 'reports' ? '' : 'none';
+  document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
+  document.getElementById('tab-reports').classList.toggle('active', view === 'reports');
+  document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
   if (view === 'board') {
     renderBoard();
     fetchBoard();
@@ -7929,7 +7955,7 @@ function enterGridMode() {
   }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
-  ['sessions','board','calendar'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
+  ['sessions','board','calendar','reports','notifications'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
   _renderGridChips();
   _wsRenderProfileBar();
