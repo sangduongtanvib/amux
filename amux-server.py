@@ -3636,7 +3636,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="ac-wrap">
         <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
           oninput="acFetch(this.value)" onfocus="acFetch(this.value)"
-          onkeydown="acKeydown(event)">
+          onpaste="_acSuppressNext=true" onkeydown="acKeydown(event)">
         <div id="ac-list" class="ac-list"></div>
       </div>
     </div>
@@ -6746,6 +6746,7 @@ async function submitCreate() {
 let acTimer = null;
 let acItems = [];
 let acSelected = -1;
+let _acSuppressNext = false;  // set true on paste — skip dropdown for that one input event
 
 function _getRecentDirs() {
   try { return JSON.parse(localStorage.getItem('amux_recent_dirs') || '[]'); } catch(e) { return []; }
@@ -6796,6 +6797,11 @@ function _acShowSuggested() {
 function acFetch(query) {
   clearTimeout(acTimer);
   const el = document.getElementById('ac-list');
+  if (_acSuppressNext) {
+    _acSuppressNext = false;
+    el.classList.remove('open');
+    return;
+  }
   if (!query || query.length < 2) {
     // Show recent/session dirs when field is empty or very short
     _acShowSuggested();
@@ -6993,6 +6999,7 @@ function _pwaCb(e) {
       e.preventDefault();
       navigator.clipboard.readText().then(text => {
         if (!text) return;
+        if (target.id === 'create-dir') _acSuppressNext = true;
         target.focus({ preventScroll: true });
         const s = target.selectionStart ?? target.value.length;
         const en = target.selectionEnd ?? target.value.length;
