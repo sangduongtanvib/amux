@@ -2829,6 +2829,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-bar button:active { opacity: 0.7; }
+  @media (min-width: 700px) { #tab-reports { margin-left: auto; } }
 
   /* Board */
   .board-search-wrap {
@@ -3255,7 +3256,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
-  <button id="tab-reports" onclick="switchView('reports')" style="margin-left:auto;">Reports</button>
+  <button id="tab-reports" onclick="switchView('reports')">Reports</button>
   <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
 </div>
