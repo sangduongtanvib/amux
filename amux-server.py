@@ -3770,6 +3770,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-reports" onclick="switchView('reports')">Reports</button>
   <button id="tab-notifications" onclick="switchView('notifications')" style="display:none;">Notifications</button>
+  <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
 </div>
 <div id="session-view">
@@ -3877,6 +3878,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Notifications</div>
     <div style="color:var(--dim);font-size:0.85rem;">Due date reminders, spend alerts, and agent updates will appear here.</div>
   </div>
+</div>
+
+<div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <div id="files-breadcrumb" style="flex:1;font-size:0.82rem;font-family:'SF Mono','Fira Code',monospace;overflow-x:auto;white-space:nowrap;"></div>
+    <button class="btn" id="files-hidden-btn" onclick="toggleFilesHidden()" style="font-size:0.7rem;padding:2px 8px;" title="Show hidden files">.*</button>
+  </div>
+  <div id="files-body" style="flex:1;overflow-y:auto;padding:0;"></div>
 </div>
 
 <!-- Schedule modal -->
@@ -6855,6 +6864,67 @@ function closeFilePreview() {
 // ═══════ FILE EXPLORER ═══════
 let _explorePath = '';
 let _exploreShowHidden = false;
+// ═══════ FILES TAB (inline directory browser) ═══════
+let _filesPath = '/';
+let _filesShowHidden = false;
+function toggleFilesHidden() {
+  _filesShowHidden = !_filesShowHidden;
+  const btn = document.getElementById('files-hidden-btn');
+  btn.style.background = _filesShowHidden ? 'var(--accent)' : '';
+  btn.style.color = _filesShowHidden ? '#000' : '';
+  loadFiles(_filesPath);
+}
+async function loadFiles(path) {
+  const body = document.getElementById('files-body');
+  body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
+  _filesPath = path;
+  // Breadcrumb
+  const parts = path.split('/').filter(Boolean);
+  let crumbHtml = '<span class="explore-crumb" onclick="loadFiles(\'/\')">/</span>';
+  let cum = '';
+  for (const part of parts) {
+    cum += '/' + part;
+    const cp = cum;
+    crumbHtml += '<span class="explore-crumb" onclick="loadFiles(\'' + cp.replace(/'/g, "\\'") + '\')"> ' + esc(part) + '</span><span style="color:var(--dim)">/</span>';
+  }
+  document.getElementById('files-breadcrumb').innerHTML = crumbHtml;
+  try {
+    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path) + (_filesShowHidden ? '&hidden=1' : ''));
+    const data = await r.json();
+    if (data.error) { body.innerHTML = '<div style="padding:16px;color:var(--dim)">' + esc(data.error) + '</div>'; return; }
+    body.innerHTML = '';
+    if (data.parent && data.parent !== data.path) {
+      const back = document.createElement('div');
+      back.className = 'explore-row';
+      back.innerHTML = '<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>';
+      back.onclick = () => loadFiles(data.parent);
+      body.appendChild(back);
+    }
+    if (!data.entries.length) {
+      body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
+      return;
+    }
+    for (const entry of data.entries) {
+      const row = document.createElement('div');
+      row.className = 'explore-row';
+      const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
+      const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
+      const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+      const menuBtn = '<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu(\'' + entryPath.replace(/'/g, "\\'") + '\',this)">⋯</button>';
+      const mtime = entry.modified ? '<span class="explore-mtime">' + timeAgo(entry.modified) + '</span>' : '';
+      row.innerHTML = '<span class="explore-icon">' + icon + '</span><span class="explore-name">' + esc(displayName) + '</span><span class="explore-size">' + esc(_fmtSize(entry.size)) + '</span>' + mtime + menuBtn;
+      if (entry.type === 'dir') {
+        row.onclick = () => loadFiles(entryPath);
+      } else {
+        row.onclick = () => openFilePreview(entryPath);
+      }
+      body.appendChild(row);
+    }
+  } catch(e) {
+    body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
+  }
+}
+
 function openExplore(startPath) {
   _explorePath = startPath || '/';
   document.getElementById('explore-overlay').classList.add('active');
@@ -7981,11 +8051,14 @@ function switchView(view) {
   document.getElementById('calendar-view').style.display = view === 'calendar' ? '' : 'none';
   document.getElementById('reports-view').style.display = view === 'reports' ? '' : 'none';
   document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
+  document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
   document.getElementById('tab-reports').classList.toggle('active', view === 'reports');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
+  document.getElementById('tab-files').classList.toggle('active', view === 'files');
+  if (view === 'files') loadFiles(_filesPath);
   if (view === 'reports') fetchReports();
   if (view === 'board') {
     renderBoard();
