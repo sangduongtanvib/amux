@@ -1237,6 +1237,40 @@ def _report_fetch_mixpeek_ops_all(cfg):
         return {v: {"name": v, "error": err, "daily": [], "monthly": []} for v in _VENDORS}
 
 
+def _report_fetch_posthog_all(cfg):
+    """Fetch PostHog product analytics from the Mixpeek ops server.
+
+    Returns {metric_id: {name, monthly, weekly, daily, error}} where each
+    metric contains user/event counts (not dollar amounts).
+
+    Config keys (all optional):
+      ops_url   — override AMUX_MIXPEEK_OPS_URL env var
+      ops_token — override AMUX_MIXPEEK_OPS_TOKEN env var
+      days      — days of history (default 90)
+    """
+    import json as _j, urllib.request as _ur, ssl as _ssl
+    _METRICS = ("active_users", "new_users", "total_events")
+    url   = cfg.get("ops_url")   or os.environ.get("AMUX_MIXPEEK_OPS_URL", "")
+    token = cfg.get("ops_token") or os.environ.get("AMUX_MIXPEEK_OPS_TOKEN", "")
+    days  = int(cfg.get("days", 90))
+    if not url:
+        err = "AMUX_MIXPEEK_OPS_URL not set"
+        return {m: {"name": m, "error": err, "daily": [], "weekly": [], "monthly": []} for m in _METRICS}
+    try:
+        req = _ur.Request(
+            f"{url.rstrip('/')}/api/dashboard/posthog?days={days}",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        with _ur.urlopen(req, timeout=60, context=ctx) as resp:
+            return _j.loads(resp.read())
+    except Exception as e:
+        err = str(e)
+        return {m: {"name": m, "error": err, "daily": [], "weekly": [], "monthly": []} for m in _METRICS}
+
+
 # Registry maps type_id → metadata + vendor fetchers.
 # To add a new report type: add an entry here. The UI reads /api/reports/types dynamically.
 _REPORT_TYPE_REGISTRY = {
@@ -1272,6 +1306,17 @@ _REPORT_TYPE_REGISTRY = {
             "mongodb_atlas": {"label": "MongoDB Atlas", "color": "#47A248", "env_vars": []},
             "gke":           {"label": "GKE Autopilot", "color": "#FF6B35", "env_vars": []},
             "qdrant_cloud":  {"label": "Qdrant Cloud",  "color": "#DC244C", "env_vars": []},
+        },
+    },
+    "posthog-analytics": {
+        "label": "PostHog Analytics",
+        "description": "Product analytics via PostHog — active users, new signups, and total events (daily/weekly/monthly). Config: days (default 90), ops_url, ops_token.",
+        "report_fetch": _report_fetch_posthog_all,
+        "display": "count",
+        "vendors": {
+            "active_users": {"label": "Active Users", "color": "#F64E0F", "env_vars": []},
+            "new_users":    {"label": "New Users",    "color": "#1D4ED8", "env_vars": []},
+            "total_events": {"label": "Total Events", "color": "#059669", "env_vars": []},
         },
     },
     # Add more report types here, e.g.:
@@ -8532,6 +8577,11 @@ async function loadReportData(id, data) {
   if (!data || !Object.keys(data).length) return;
   const body = document.getElementById('rpt-body-' + id);
   if (!body) return;
+  const _rCard = body.closest('[data-report-id]');
+  const _rtype = _rCard ? (_rCard.dataset.reportType || 'infra-spend') : 'infra-spend';
+  const _isCount = (_reportTypes[_rtype]?.display === 'count');
+  const _col0 = _isCount ? 'Metric' : 'Vendor';
+  const _col4 = _isCount ? 'Total (90d)' : 'Total (12mo)';
   body.innerHTML = `
     <div class="report-period-tabs" style="margin-bottom:10px;">
       <button class="report-period-tab active" onclick="setReportPeriod('${id}','monthly',this)">Monthly</button>
@@ -8540,15 +8590,13 @@ async function loadReportData(id, data) {
     </div>
     <div class="report-chart-wrap"><canvas id="rpt-chart-${id}"></canvas></div>
     <table class="report-table">
-      <thead><tr><th>Vendor</th><th style="text-align:right">This Month</th><th style="text-align:right">Last Month</th><th style="text-align:right">Total (12mo)</th></tr></thead>
+      <thead><tr><th>${_col0}</th><th style="text-align:right">This Month</th><th style="text-align:right">Last Month</th><th style="text-align:right">${_col4}</th></tr></thead>
       <tbody id="rpt-table-${id}"></tbody>
     </table>
   `;
   body._data = data;
   body._period = 'monthly';
-  // store report type for vendor color/label lookups
-  const _rCard = body.closest('[data-report-id]');
-  body._rtype = _rCard ? (_rCard.dataset.reportType || 'infra-spend') : 'infra-spend';
+  body._rtype = _rtype;
   _renderReportChart(id, data, 'monthly');
 }
 
@@ -8592,6 +8640,8 @@ function _renderReportChart(id, data, period) {
   // Destroy old chart
   if (_reportCharts[id]) { try { _reportCharts[id].destroy(); } catch(e){} }
 
+  const _isCount = (_reportTypes[rtype]?.display === 'count');
+  const _yFmt = _isCount ? (v => v.toLocaleString()) : (v => '$' + v.toFixed(0));
   if (typeof Chart !== 'undefined' && labels.length) {
     _reportCharts[id] = new Chart(canvas, {
       type: 'bar',
@@ -8600,8 +8650,8 @@ function _renderReportChart(id, data, period) {
         responsive: true, maintainAspectRatio: false,
         plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, boxWidth: 12 } } },
         scales: {
-          x: { stacked: true, ticks: { font: { size: 10 }, maxRotation: 45 } },
-          y: { stacked: true, ticks: { font: { size: 10 }, callback: v => '$' + v.toFixed(0) } }
+          x: { stacked: !_isCount, ticks: { font: { size: 10 }, maxRotation: 45 } },
+          y: { stacked: !_isCount, ticks: { font: { size: 10 }, callback: _yFmt } }
         }
       }
     });
@@ -8629,18 +8679,20 @@ function _renderReportChart(id, data, period) {
       const lastAmt = monthly.find(m=>m.month===lastMo)?.amount||0;
       const total12 = monthly.slice(-12).reduce((a,m)=>a+m.amount,0);
       totThis+=thisAmt; totLast+=lastAmt; tot12+=total12;
+      const _fmt = _isCount ? (v => v.toLocaleString()) : (v => '$' + v.toFixed(2));
       rows += `<tr>
         <td><span class="report-vendor-dot" style="background:${vcolor}"></span>${vlabel}</td>
-        <td style="text-align:right">$${thisAmt.toFixed(2)}</td>
-        <td style="text-align:right">$${lastAmt.toFixed(2)}</td>
-        <td style="text-align:right">$${total12.toFixed(2)}</td>
+        <td style="text-align:right">${_fmt(thisAmt)}</td>
+        <td style="text-align:right">${_fmt(lastAmt)}</td>
+        <td style="text-align:right">${_fmt(total12)}</td>
       </tr>`;
     });
+    const _fmtTot = _isCount ? (v => v.toLocaleString()) : (v => '$' + v.toFixed(2));
     rows += `<tr class="report-total">
       <td>Total</td>
-      <td style="text-align:right">$${totThis.toFixed(2)}</td>
-      <td style="text-align:right">$${totLast.toFixed(2)}</td>
-      <td style="text-align:right">$${tot12.toFixed(2)}</td>
+      <td style="text-align:right">${_fmtTot(totThis)}</td>
+      <td style="text-align:right">${_fmtTot(totLast)}</td>
+      <td style="text-align:right">${_fmtTot(tot12)}</td>
     </tr>`;
     tbody.innerHTML = rows;
   }
