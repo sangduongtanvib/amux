@@ -7010,6 +7010,10 @@ function slashAcPick(i) {
   if (el._atItems) {
     el._atSel = i;
     _atInsert(inp, el);
+    // Auto-send if the message has content beyond just the @mention itself
+    const val = inp.value.trim();
+    const onlyMention = /^@[\w][\w.-]*\s*$/.test(val);
+    if (!onlyMention) { setTimeout(sendPeekCmd, 0); return; }
   } else {
     inp.value = slashAcItems[i].cmd;
     el.classList.remove('open');
