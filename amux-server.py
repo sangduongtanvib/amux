@@ -8977,8 +8977,8 @@ async function fetchLogs() {
     if (!r.ok) return;
     const d = await r.json();
     _logsEvents = (d.events || []).map(e => ({
-      ...e, type: e.category, target: e.detail, ip: e.actor,
-      status: e.level === 'error' ? 500 : 200,
+      ...e, type: e.type || e.category, target: e.target || e.detail, ip: e.ip || e.actor,
+      status: e.level === 'error' ? 500 : (e.status || 200),
     }));
     renderActivity();
     if (_logsSubtab === 'stats') renderStats();
@@ -10924,7 +10924,7 @@ function connectSSE() {
       } else if (msg.type === 'logs' && activeView === 'logs') {
         // Merge new events into the local array (newest first display)
         const newEvts = (msg.payload || []).map(e => ({
-          ...e, type: e.type || e.category, target: e.detail, ip: e.actor || e.ip,
+          ...e, type: e.type || e.category, target: e.target || e.detail, ip: e.ip || e.actor,
           status: e.level === 'error' ? 500 : (e.status || 200),
         }));
         if (newEvts.length) {
