@@ -4232,6 +4232,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:2px;"><script>document.write(location.host)</script></div>
       <div style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">v0.6.0 &#x21BB;</div>
       <div id="update-status" style="color:var(--dim);font-size:0.75rem;min-height:1.2em;"></div>
+      <button class="btn" onclick="pullFromRemote(this)" style="margin-top:6px;font-size:0.72rem;padding:4px 12px;">&#x2B07; Pull from remote</button>
+      <div id="pull-status" style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:4px;min-height:1.2em;white-space:pre-wrap;max-height:60px;overflow-y:auto;"></div>
     </div>
     <div id="daily-stats" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
       <div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading token stats...</div>
@@ -10322,6 +10324,25 @@ function forceUpdate() {
   });
 }
 
+async function pullFromRemote(btn) {
+  const el = document.getElementById('pull-status');
+  btn.disabled = true; btn.textContent = '⏳ Pulling...';
+  el.textContent = '';
+  try {
+    const r = await fetch(API + '/api/pull', { method: 'POST' });
+    const d = await r.json();
+    el.textContent = d.output || (d.ok ? 'Up to date' : 'Failed');
+    el.style.color = d.ok ? 'var(--green)' : 'var(--red)';
+    if (d.ok && !d.output.includes('Already up to date')) {
+      setTimeout(() => forceUpdate(), 1500);
+    }
+  } catch(e) {
+    el.textContent = 'Network error';
+    el.style.color = 'var(--red)';
+  }
+  btn.disabled = false; btn.textContent = '⬇ Pull from remote';
+}
+
 // ── DevTools Panel ──────────────────────────────────────────────
 (function() {
   const MAX_LOG = 500;
@@ -11096,6 +11117,22 @@ class CCHandler(BaseHTTPRequestHandler):
             db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?", (key, value, value))
             db.commit()
             return self._json({"ok": True, "key": key, "value": value})
+
+        # POST /api/pull — git pull in the repo directory
+        if method == "POST" and path == "/api/pull":
+            repo_dir = Path(__file__).resolve().parent
+            try:
+                r = subprocess.run(
+                    ["git", "pull", "--ff-only"],
+                    cwd=str(repo_dir), capture_output=True, text=True, timeout=30,
+                )
+                output = (r.stdout + r.stderr).strip()
+                slog(f"[pull] rc={r.returncode} {output[:200]}")
+                if r.returncode == 0:
+                    return self._json({"ok": True, "output": output})
+                return self._json({"ok": False, "output": output}, 500)
+            except Exception as e:
+                return self._json({"ok": False, "output": str(e)}, 500)
 
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
