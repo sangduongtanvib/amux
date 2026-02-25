@@ -6214,9 +6214,12 @@ function clearSendingIndicator() {
 
 async function doSend(name, text) {
   showSendingIndicator();
+  const now = new Date();
+  const ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true});
+  const stamped = `[${ts}] ${text}`;
   await apiCall(API + '/api/sessions/' + name + '/send', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({text})
+    body: JSON.stringify({text: stamped})
   });
 }
 
