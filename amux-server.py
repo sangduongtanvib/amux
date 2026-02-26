@@ -7012,7 +7012,7 @@ async function toggleMic() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showToast('Mic unavailable — requires HTTPS or localhost');
     } else if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-      showToast('Microphone blocked — allow access in browser Site Settings');
+      showToast('Microphone blocked — System Settings → Privacy & Security → Microphone → allow Chrome');
     } else if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
       showToast('No microphone found');
     } else {
