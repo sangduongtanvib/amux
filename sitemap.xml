@@ -164,4 +164,15 @@
   <url><loc>https://amux.io/solutions/</loc><changefreq>weekly</changefreq></url>
   <url><loc>https://amux.io/blog/</loc><changefreq>weekly</changefreq></url>
   <url><loc>https://amux.io/for/</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://amux.io/demos/session-cards-overview/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/send-command-dashboard/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/kanban-board-overview/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/atomic-task-claiming/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/self-healing-watchdog/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/workspace-tiled-view/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/agent-orchestration/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/ical-calendar-sync/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/conversation-fork/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/mobile-pwa/</loc><changefreq>monthly</changefreq></url>
+  <url><loc>https://amux.io/demos/</loc><changefreq>monthly</changefreq></url>
 </urlset>
