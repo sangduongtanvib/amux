@@ -199,7 +199,19 @@ def _rb_agent_update(**kwargs):
 def _run_browser_agent(task: str, start_url: str = "", max_steps: int = 25):
     """Drive the browser with Claude tool-use, record everything, produce MP4."""
     global _rb_last_video
-    import anthropic
+    try:
+        import anthropic
+    except ImportError:
+        # Framework Python may have restricted sys.path after os.execv — add site-packages explicitly
+        import sys as _sys, site as _site
+        for _sp in _site.getsitepackages():
+            if _sp not in _sys.path:
+                _sys.path.insert(1, _sp)
+        try:
+            import anthropic
+        except ImportError:
+            _rb_agent_update(running=False, error="anthropic not installed — run: python3 -m pip install anthropic", action="Error")
+            return
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -224,19 +236,18 @@ def _run_browser_agent(task: str, start_url: str = "", max_steps: int = 25):
          "input_schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
     ]
 
-    _rb_agent_update(action="Starting browser…", total_steps=max_steps)
-    start_cmd: dict = {"action": "start", "url": start_url or "about:blank", "record": True}
-    with _rb_agent_lock:
-        prof = _rb_agent_state.get("_profile", _rb_profile)
-    if prof and prof != "default":
-        start_cmd["profile"] = prof
-    result = _rb_send(start_cmd, timeout=30.0)
-    if not result.get("ok"):
-        _rb_agent_update(running=False, error=result.get("error", "Browser start failed"))
-        return
-
     messages: list = []
     try:
+        _rb_agent_update(action="Starting browser…", total_steps=max_steps)
+        start_cmd: dict = {"action": "start", "url": start_url or "about:blank", "record": True}
+        with _rb_agent_lock:
+            prof = _rb_agent_state.get("_profile", _rb_profile)
+        if prof and prof != "default":
+            start_cmd["profile"] = prof
+        result = _rb_send(start_cmd, timeout=30.0)
+        if not result.get("ok"):
+            _rb_agent_update(running=False, error=result.get("error", "Browser start failed"))
+            return
         for step in range(max_steps):
             with _rb_agent_lock:
                 if not _rb_agent_state["running"]:
