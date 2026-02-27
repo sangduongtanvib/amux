@@ -6946,6 +6946,7 @@ let _micChunks = [];
 let _micActive = false;
 
 async function _checkTranscription() {
+  if (!window.isSecureContext) return;
   try {
     const r = await fetch(API + '/api/transcribe');
     const d = await r.json();
