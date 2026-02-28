@@ -12801,6 +12801,126 @@ async function pullFromRemote(btn) {
   _dtLogPush('info', '[devtools] Panel initialised — ' + new Date().toLocaleString());
 })();
 </script>
+
+<script>
+// ── Email Events tab ──────────────────────────────────────────────────────────
+let _emailAccounts = [];
+let _emailEvents   = [];
+
+async function _emailLoad() {
+  await Promise.all([_emailFetchAccounts(), _emailFetchEvents()]);
+  _emailRenderAccounts();
+  _emailRender();
+}
+
+async function _emailFetchAccounts() {
+  try {
+    const r = await fetch('/api/email/accounts');
+    if (r.status === 503) {
+      document.getElementById('email-setup-notice').style.display = '';
+      document.getElementById('email-connect-btn').style.display = 'none';
+      document.getElementById('email-sync-btn').style.display = 'none';
+      return;
+    }
+    document.getElementById('email-setup-notice').style.display = 'none';
+    document.getElementById('email-connect-btn').style.display = '';
+    document.getElementById('email-sync-btn').style.display = '';
+    _emailAccounts = await r.json();
+  } catch(e) { console.error('email accounts', e); }
+}
+
+async function _emailFetchEvents() {
+  try {
+    const filter = document.getElementById('email-filter').value;
+    const url = '/api/email/events' + (filter ? '?status=' + filter : '');
+    const r = await fetch(url);
+    _emailEvents = r.ok ? await r.json() : [];
+  } catch(e) { _emailEvents = []; }
+}
+
+function _emailRenderAccounts() {
+  const el = document.getElementById('email-accounts-list');
+  if (!_emailAccounts.length) {
+    el.innerHTML = '<div style="font-size:0.78rem;color:var(--dim);padding:4px 0 8px;">No accounts connected.</div>';
+    return;
+  }
+  el.innerHTML = _emailAccounts.map(a => {
+    const synced = a.last_synced ? new Date(a.last_synced * 1000).toLocaleString() : 'never';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">'
+      + '<span style="font-size:0.8rem;color:var(--accent);">\u2709 ' + escHtml(a.email) + '</span>'
+      + '<span style="font-size:0.72rem;color:var(--dim);flex:1;">synced ' + synced + '</span>'
+      + '<button class="btn" onclick="_emailDisconnect(\'' + a.id + '\')" style="font-size:0.7rem;padding:2px 8px;color:var(--red);">Disconnect</button>'
+      + '</div>';
+  }).join('');
+}
+
+async function _emailRender() {
+  await _emailFetchEvents();
+  const el = document.getElementById('email-events-list');
+  const visible = _emailEvents.filter(e => e.status !== 'not_event');
+  if (!visible.length) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:32px 0;">No events detected yet. Connect a Gmail account and sync to get started.</div>';
+    return;
+  }
+  el.innerHTML = visible.map(ev => {
+    const statusColor = ev.status === 'synced' ? 'var(--green)' : ev.status === 'dismissed' ? 'var(--dim)' : 'var(--yellow)';
+    const statusLabel = ev.status === 'synced' ? '\u2713 On Calendar' : ev.status === 'dismissed' ? '\u2014 Dismissed' : '\u23f3 Pending';
+    let startFmt = '';
+    if (ev.event_start) {
+      try {
+        const d = new Date(ev.event_start.includes('T') ? ev.event_start : ev.event_start + 'T00:00:00');
+        startFmt = d.toLocaleString(undefined, {dateStyle:'medium', timeStyle: ev.event_start.includes('T') ? 'short' : undefined});
+      } catch(e) { startFmt = ev.event_start; }
+    }
+    return '<div style="background:var(--card);border:1px solid var(--border);border-radius:7px;padding:10px 12px;">'
+      + '<div style="display:flex;align-items:flex-start;gap:8px;">'
+      + '<div style="flex:1;min-width:0;">'
+      + '<div style="font-weight:600;font-size:0.85rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escHtml(ev.event_title || ev.email_subject || '(unknown)') + '</div>'
+      + (startFmt ? '<div style="font-size:0.78rem;color:var(--accent);margin-top:2px;">\uD83D\uDCC5 ' + startFmt + '</div>' : '')
+      + (ev.event_location ? '<div style="font-size:0.75rem;color:var(--dim);margin-top:2px;">\uD83D\uDCCD ' + escHtml(ev.event_location) + '</div>' : '')
+      + (ev.event_description ? '<div style="font-size:0.75rem;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escHtml(ev.event_description) + '</div>' : '')
+      + '<div style="font-size:0.7rem;color:var(--dim);margin-top:4px;">' + escHtml(ev.account_email || '') + ' &bull; ' + escHtml((ev.email_from || '').replace(/<[^>]+>/, '').trim()) + '</div>'
+      + '</div>'
+      + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;">'
+      + '<span style="font-size:0.72rem;font-weight:600;color:' + statusColor + ';">' + statusLabel + '</span>'
+      + (ev.status === 'pending' ? '<button class="btn" onclick="_emailPush(\'' + ev.id + '\')" style="font-size:0.7rem;padding:2px 8px;">\uD83D\uDCC5 Push</button>' : '')
+      + (ev.status !== 'dismissed' ? '<button class="btn" onclick="_emailDismiss(\'' + ev.id + '\')" style="font-size:0.7rem;padding:2px 8px;color:var(--dim);">\u2715</button>' : '')
+      + '</div></div></div>';
+  }).join('');
+}
+
+async function _emailSync() {
+  const btn = document.getElementById('email-sync-btn');
+  btn.textContent = 'Syncing\u2026';
+  btn.disabled = true;
+  try {
+    await fetch('/api/email/sync', {method:'POST'});
+    setTimeout(() => { btn.textContent = '\u21BB Sync Now'; btn.disabled = false; _emailRender(); }, 3000);
+  } catch(e) { btn.textContent = '\u21BB Sync Now'; btn.disabled = false; }
+}
+
+async function _emailDisconnect(id) {
+  if (!confirm('Disconnect this Gmail account? Detected events will be removed.')) return;
+  await fetch('/api/email/accounts/' + id, {method:'DELETE'});
+  _emailLoad();
+}
+
+async function _emailPush(id) {
+  const r = await fetch('/api/email/events/' + id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({push: true})});
+  const d = await r.json();
+  if (d.ok) _emailRender();
+  else alert('Failed: ' + (d.error || 'unknown'));
+}
+
+async function _emailDismiss(id) {
+  await fetch('/api/email/events/' + id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status:'dismissed'})});
+  _emailRender();
+}
+
+// Auto-open email tab if redirected from OAuth callback
+if (location.hash === '#email') switchView('email');
+</script>
+
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
@@ -14868,6 +14988,204 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "nothing to update"}, 400)
             return self._json({"error": "not found"}, 404)
 
+        # ── /api/email/* — Gmail OAuth + event extraction + Calendar sync ────────
+        if path.startswith("/api/email"):
+            if not _GOOGLE_CLIENT_ID or not _GOOGLE_CLIENT_SECRET:
+                return self._json(
+                    {"error": "Set AMUX_GOOGLE_CLIENT_ID and AMUX_GOOGLE_CLIENT_SECRET in ~/.amux/server.env"},
+                    503,
+                )
+
+            # GET /api/email/connect — start OAuth flow
+            if method == "GET" and path == "/api/email/connect":
+                import urllib.parse as _up
+                state = str(uuid.uuid4())
+                _email_oauth_states[state] = int(time.time()) + 600
+                params = {
+                    "client_id": _GOOGLE_CLIENT_ID,
+                    "redirect_uri": _GOOGLE_REDIRECT_URI,
+                    "response_type": "code",
+                    "scope": " ".join(_GOOGLE_SCOPES),
+                    "access_type": "offline",
+                    "prompt": "consent select_account",
+                    "state": state,
+                }
+                redir = "https://accounts.google.com/o/oauth2/v2/auth?" + _up.urlencode(params)
+                self.send_response(302)
+                self._cors()
+                self.send_header("Location", redir)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
+            # GET /api/email/callback — handle OAuth redirect
+            if method == "GET" and path == "/api/email/callback":
+                import urllib.parse as _up, urllib.request as _ur
+                code  = qs.get("code",  [""])[0]
+                state = qs.get("state", [""])[0]
+                error = qs.get("error", [""])[0]
+                if error or not code:
+                    body_html = (f"<html><body style='font-family:system-ui;padding:40px'>"
+                                 f"<b>OAuth error:</b> {error or 'no code returned'}<br>"
+                                 f"<a href='/'>Back to dashboard</a></body></html>").encode()
+                    self.send_response(400)
+                    self._cors()
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body_html)))
+                    self.end_headers()
+                    self.wfile.write(body_html)
+                    return
+                # Exchange code for tokens
+                token_data = _up.urlencode({
+                    "code": code,
+                    "client_id": _GOOGLE_CLIENT_ID,
+                    "client_secret": _GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": _GOOGLE_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                }).encode()
+                try:
+                    req = _ur.Request(
+                        "https://oauth2.googleapis.com/token", data=token_data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                    with _ur.urlopen(req, timeout=15) as r:
+                        tokens = json.loads(r.read())
+                except Exception as e:
+                    body_html = f"<html><body>Token exchange failed: {e}<br><a href='/'>Back</a></body></html>".encode()
+                    self.send_response(500)
+                    self._cors()
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(body_html)))
+                    self.end_headers()
+                    self.wfile.write(body_html)
+                    return
+                # Get user email
+                try:
+                    ui_req = _ur.Request(
+                        "https://www.googleapis.com/oauth2/v2/userinfo",
+                        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+                    )
+                    with _ur.urlopen(ui_req, timeout=10) as r:
+                        user_info = json.loads(r.read())
+                    email = user_info.get("email", "unknown")
+                except Exception:
+                    email = "unknown"
+                db = get_db()
+                existing = db.execute(
+                    "SELECT id FROM email_accounts WHERE email=?", (email,)
+                ).fetchone()
+                acc_id   = existing["id"] if existing else str(uuid.uuid4())
+                expiry   = int(time.time()) + tokens.get("expires_in", 3600)
+                if existing:
+                    if "refresh_token" in tokens:
+                        db.execute(
+                            "UPDATE email_accounts SET access_token=?, refresh_token=?, token_expiry=?, enabled=1 WHERE id=?",
+                            (tokens["access_token"], tokens["refresh_token"], expiry, acc_id),
+                        )
+                    else:
+                        db.execute(
+                            "UPDATE email_accounts SET access_token=?, token_expiry=?, enabled=1 WHERE id=?",
+                            (tokens["access_token"], expiry, acc_id),
+                        )
+                else:
+                    db.execute(
+                        "INSERT INTO email_accounts (id, email, access_token, refresh_token, token_expiry, created) VALUES (?,?,?,?,?,?)",
+                        (acc_id, email, tokens.get("access_token"), tokens.get("refresh_token"), expiry, int(time.time())),
+                    )
+                db.commit()
+                slog(f"[email] connected account: {email}")
+                threading.Thread(target=_email_sync_account, args=(acc_id,), daemon=True).start()
+                self.send_response(302)
+                self._cors()
+                self.send_header("Location", "/#email")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+
+            # GET /api/email/accounts
+            if method == "GET" and path == "/api/email/accounts":
+                rows = get_db().execute(
+                    "SELECT id, email, calendar_id, last_synced, enabled FROM email_accounts ORDER BY created"
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+
+            # DELETE /api/email/accounts/<id>
+            m2 = re.match(r"^/api/email/accounts/([a-f0-9-]+)$", path)
+            if m2 and method == "DELETE":
+                aid = m2.group(1)
+                get_db().execute("DELETE FROM email_events  WHERE account_id=?", (aid,))
+                get_db().execute("DELETE FROM email_accounts WHERE id=?", (aid,))
+                get_db().commit()
+                return self._json({"ok": True})
+
+            # GET /api/email/events
+            if method == "GET" and path == "/api/email/events":
+                status_f = qs.get("status", [""])[0]
+                if status_f:
+                    rows = get_db().execute(
+                        "SELECT e.*, a.email as account_email FROM email_events e "
+                        "JOIN email_accounts a ON e.account_id=a.id "
+                        "WHERE e.status=? ORDER BY e.event_start, e.created DESC LIMIT 200",
+                        (status_f,),
+                    ).fetchall()
+                else:
+                    rows = get_db().execute(
+                        "SELECT e.*, a.email as account_email FROM email_events e "
+                        "JOIN email_accounts a ON e.account_id=a.id "
+                        "WHERE e.status != 'not_event' ORDER BY e.event_start, e.created DESC LIMIT 200",
+                    ).fetchall()
+                return self._json([dict(r) for r in rows])
+
+            # POST /api/email/sync — trigger manual sync
+            if method == "POST" and path == "/api/email/sync":
+                accounts = get_db().execute(
+                    "SELECT id FROM email_accounts WHERE enabled=1"
+                ).fetchall()
+                if not accounts:
+                    return self._json({"error": "no accounts connected"}, 400)
+                for acc in accounts:
+                    threading.Thread(
+                        target=_email_sync_account, args=(acc["id"],), daemon=True
+                    ).start()
+                return self._json({"ok": True, "syncing": len(accounts)})
+
+            # PATCH /api/email/events/<id>
+            m2 = re.match(r"^/api/email/events/([a-f0-9-]+)$", path)
+            if m2 and method == "PATCH":
+                ev_id = m2.group(1)
+                body  = self._body_json()
+                ev = get_db().execute(
+                    "SELECT * FROM email_events WHERE id=?", (ev_id,)
+                ).fetchone()
+                if not ev:
+                    return self._json({"error": "not found"}, 404)
+                if body.get("status") == "dismissed":
+                    get_db().execute(
+                        "UPDATE email_events SET status='dismissed' WHERE id=?", (ev_id,)
+                    )
+                    get_db().commit()
+                    return self._json({"ok": True})
+                if body.get("push"):
+                    event_data = {
+                        "title":       ev["event_title"],
+                        "start":       ev["event_start"],
+                        "end":         ev["event_end"],
+                        "location":    ev["event_location"],
+                        "description": ev["event_description"],
+                    }
+                    cal_id = _gcal_create_event(ev["account_id"], event_data)
+                    if cal_id:
+                        get_db().execute(
+                            "UPDATE email_events SET status='synced', calendar_event_id=? WHERE id=?",
+                            (cal_id, ev_id),
+                        )
+                        get_db().commit()
+                        return self._json({"ok": True, "calendar_event_id": cal_id})
+                    return self._json({"error": "calendar event creation failed"}, 500)
+                return self._json({"error": "nothing to update"}, 400)
+
+            return self._json({"error": "not found"}, 404)
+
         return self._json({"error": "method not allowed"}, 405)
 
     def do_OPTIONS(self):
@@ -15212,6 +15530,8 @@ def main():
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
     # Start schedule runner thread
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    # Start email → calendar sync thread
+    threading.Thread(target=_email_sync_loop, daemon=True).start()
     # Start auto-update thread (if configured)
     if _AUTO_UPDATE_REPO:
         threading.Thread(target=_auto_update_loop, daemon=True).start()
