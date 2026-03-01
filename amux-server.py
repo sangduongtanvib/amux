@@ -5537,7 +5537,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
     <span style="flex-shrink:0;opacity:0.6;">&#x1F4C1;</span>
-    <span id="peek-dir-text"></span>
+    <span id="peek-dir-text" onclick="peekSessionDir&&openExplore(peekSessionDir,peekSession)" title="Browse directory" style="cursor:pointer;text-decoration:underline;text-decoration-color:var(--dim);text-underline-offset:2px;"></span>
     <span class="card-dir-edit" id="peek-dir-edit" onclick="editField(peekSession,'dir',peekSessionDir)" title="Change directory">&#x270E;</span>
   </div>
   <!-- Terminal panel -->
