@@ -187,6 +187,12 @@ _RB_VIDEOS_DIR = CC_HOME / "browser-videos"
 _RB_RECORDINGS_DIR = CC_HOME / "recordings"
 
 
+def _profile_has_state(profile_path: Path) -> bool:
+    """Return True if the Chromium profile has saved cookies (i.e. the user has logged in)."""
+    cookies = profile_path / "Default" / "Cookies"
+    return cookies.is_file() and cookies.stat().st_size > 4096
+
+
 def _ms_to_srt_ts(ms: int) -> str:
     """Convert milliseconds to SRT timecode HH:MM:SS,mmm."""
     h = ms // 3_600_000; ms %= 3_600_000
@@ -203,7 +209,8 @@ def _write_srt(captions: list, srt_path: str) -> None:
     Path(srt_path).write_text("\n\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _rb_process_video(webm: str, captions: list | None = None) -> str:
+def _rb_process_video(webm: str, captions: list | None = None,
+                      profile: str | None = None, task: str | None = None) -> str:
     """Convert WebM → MP4, burning in SRT captions if provided. Returns final path."""
     global _rb_last_video
     _RB_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,6 +236,7 @@ def _rb_process_video(webm: str, captions: list | None = None) -> str:
             )
             if r.returncode == 0 and os.path.exists(mp4):
                 _rb_last_video = mp4
+                _rb_write_recording_meta(mp4, profile, task)
                 return mp4
         except Exception:
             pass
@@ -242,12 +250,25 @@ def _rb_process_video(webm: str, captions: list | None = None) -> str:
         )
         if r.returncode == 0 and os.path.exists(mp4):
             _rb_last_video = mp4
+            _rb_write_recording_meta(mp4, profile, task)
             return mp4
     except Exception:
         pass
 
     _rb_last_video = webm
     return webm
+
+
+def _rb_write_recording_meta(mp4_path: str, profile: str | None, task: str | None) -> None:
+    """Write a .json sidecar next to an MP4 recording with profile + task metadata."""
+    import json as _json
+    meta = {k: v for k, v in {"profile": profile or "default", "task": task}.items() if v}
+    try:
+        Path(mp4_path).with_suffix(".json").write_text(
+            _json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 # ── Browser agent state ──
 _rb_agent_state: dict = {
@@ -376,7 +397,10 @@ def _run_browser_agent(task: str, start_url: str = "", max_steps: int = 25):
         webm = stop_result.get("videoPath")
         captions = stop_result.get("captions") or []
         if webm and os.path.exists(webm):
-            _rb_process_video(webm, captions or None)
+            with _rb_agent_lock:
+                agent_prof = _rb_agent_state.get("_profile") or _rb_profile
+                agent_task = _rb_agent_state.get("task") or ""
+            _rb_process_video(webm, captions or None, profile=agent_prof, task=agent_task or None)
         video_ready = bool(_rb_last_video)
         _rb_agent_update(
             running=False, done=True, video_ready=video_ready,
@@ -537,7 +561,7 @@ rl.on('line', async (line) => {
           switchToPage(newPage);
           await newPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
         });
-        if (cmd.url && !headed) {
+        if (cmd.url) {
           await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
         }
         respond({ ok: true, url: headed ? '' : page.url(), title: headed ? '' : await page.title(), profile: cmd.profile || 'default', headed });
@@ -5246,7 +5270,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="_rbHideNewProfile()" style="font-size:0.6rem;padding:1px 6px;">&#x2715;</button>
     </span>
     <button class="btn" id="rb-del-profile" onclick="_rbDeleteProfile()" style="font-size:0.6rem;padding:1px 6px;color:var(--red);display:none;" title="Delete profile">&#x2715;</button>
-    <button class="btn" onclick="_rbLogin()" style="font-size:0.6rem;padding:1px 8px;" title="Open headed browser to log in and save credentials">&#x1F511; Login</button>
+    <span id="rb-profile-state" style="font-size:0.72rem;line-height:1;" title="Profile has saved login state"></span>
+    <button class="btn" id="rb-login-btn" onclick="_rbShowLoginUrl()" style="font-size:0.6rem;padding:1px 8px;" title="Log in and save credentials to this profile">&#x1F511; Login</button>
+    <span id="rb-login-url-form" style="display:none;align-items:center;gap:4px;">
+      <input id="rb-login-url" type="text" placeholder="https://site.com/login" autocomplete="off"
+        style="font-size:0.7rem;padding:2px 6px;width:160px;background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;"
+        onkeydown="if(event.key==='Enter')_rbDoLogin();if(event.key==='Escape')_rbHideLoginUrl()">
+      <button class="btn primary" onclick="_rbDoLogin()" style="font-size:0.6rem;padding:1px 7px;">Open</button>
+      <button class="btn" onclick="_rbHideLoginUrl()" style="font-size:0.6rem;padding:1px 6px;">&#x2715;</button>
+    </span>
     <button class="btn" id="rb-rec-btn" onclick="_rbToggleRecord()" style="font-size:0.6rem;padding:1px 8px;" title="Toggle video recording (takes effect on next launch)">&#x23FA; Rec</button>
     <button class="btn" onclick="openRecordingsDir()" style="font-size:0.6rem;padding:1px 8px;" title="Browse saved recordings">&#x1F3A5; Recordings</button>
     <span id="rb-profile-status" style="color:var(--dim);margin-left:auto;"></span>
@@ -8424,6 +8456,8 @@ function _renderFileBody(data, mode) {
         ${sizeMB ? `<span>${sizeMB}</span>` : ''}
         ${dateStr ? `<span>${dateStr}</span>` : ''}
         ${data.srt ? '<span>📝 Captions</span>' : ''}
+        ${data.profile && data.profile !== 'default' ? `<span>👤 ${esc(data.profile)}</span>` : ''}
+        ${data.task ? `<span title="${esc(data.task)}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">🎯 ${esc(data.task)}</span>` : ''}
         <a href="${rawUrl}" download="${fname}" style="margin-left:auto;color:var(--accent);text-decoration:none;">⬇ Download</a>
       </div>`;
     return;
@@ -8560,12 +8594,23 @@ async function _rbLoadProfiles() {
       const opt = document.createElement('option');
       opt.value = p.name;
       opt.textContent = p.name;
+      opt.dataset.hasState = p.has_state ? '1' : '';
       sel.appendChild(opt);
     }
     _rbCurrentProfile = d.active || 'default';
     sel.value = _rbCurrentProfile;
     document.getElementById('rb-del-profile').style.display = _rbCurrentProfile !== 'default' ? '' : 'none';
+    _rbUpdateProfileState(d.profiles || []);
   } catch(e) {}
+}
+
+function _rbUpdateProfileState(profiles) {
+  const current = profiles.find(p => p.name === _rbCurrentProfile);
+  const dot = document.getElementById('rb-profile-state');
+  if (dot) {
+    dot.textContent = current?.has_state ? '🟢' : '⚪';
+    dot.title = current?.has_state ? 'Logged in — credentials saved' : 'No saved login for this profile';
+  }
 }
 
 function _rbShowNewProfile() {
@@ -8615,6 +8660,7 @@ async function _rbSwitchProfile(name) {
   _rbCurrentProfile = name;
   document.getElementById('rb-del-profile').style.display = name !== 'default' ? '' : 'none';
   document.getElementById('rb-profile-status').textContent = '';
+  await _rbLoadProfiles();
   // If browser is running, restart with new profile
   if (_rbActive) {
     await _rbStop();
@@ -8702,13 +8748,30 @@ function _rbSetRecord(enabled) {
   }
 }
 
-async function _rbLogin() {
+function _rbShowLoginUrl() {
+  document.getElementById('rb-login-btn').style.display = 'none';
+  const form = document.getElementById('rb-login-url-form');
+  form.style.display = 'flex';
+  const inp = document.getElementById('rb-login-url');
+  inp.value = '';
+  inp.focus();
+}
+
+function _rbHideLoginUrl() {
+  document.getElementById('rb-login-btn').style.display = '';
+  document.getElementById('rb-login-url-form').style.display = 'none';
+}
+
+async function _rbDoLogin() {
+  const url = document.getElementById('rb-login-url').value.trim();
+  _rbHideLoginUrl();
   if (_rbActive) await _rbStop();
   const status = document.getElementById('rb-status');
   status.textContent = 'Opening...';
   try {
     const body = { headed: true };
     if (_rbCurrentProfile && _rbCurrentProfile !== 'default') body.profile = _rbCurrentProfile;
+    if (url) body.url = url;
     const r = await fetch(API + '/api/browser/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
@@ -8724,7 +8787,7 @@ async function _rbLogin() {
     document.getElementById('rb-placeholder').style.display = 'none';
     document.getElementById('rb-screen').style.display = 'none';
     document.getElementById('rb-login-panel').style.display = '';
-    document.getElementById('rb-profile-status').textContent = 'Login window open';
+    document.getElementById('rb-profile-status').textContent = 'Login window open — navigate and log in, then click Done';
     status.textContent = '';
   } catch(e) {
     status.textContent = 'Error: ' + e.message;
@@ -8733,6 +8796,7 @@ async function _rbLogin() {
 
 async function _rbLoginDone() {
   await _rbStop();
+  await _rbLoadProfiles();  // refresh state dot
   const ps = document.getElementById('rb-profile-status');
   ps.textContent = 'Credentials saved for ' + _rbCurrentProfile;
   setTimeout(() => { if (ps.textContent.startsWith('Credentials')) ps.textContent = ''; }, 3000);
@@ -14100,7 +14164,7 @@ class CCHandler(BaseHTTPRequestHandler):
             webm = result.get("videoPath")
             captions = result.get("captions") or []
             if webm and os.path.exists(webm):
-                _rb_process_video(webm, captions or None)
+                _rb_process_video(webm, captions or None, profile=_rb_profile)
             return self._json({"ok": True, "videoReady": bool(_rb_last_video)})
 
         # POST /api/browser/agent — start AI agent task
@@ -14153,11 +14217,14 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/browser/profiles — list available profiles
         if method == "GET" and path == "/api/browser/profiles":
-            profiles = [{"name": "default", "path": str(CC_HOME / "playwright-auth" / "profile")}]
+            default_path = CC_HOME / "playwright-auth" / "profile"
+            profiles = [{"name": "default", "path": str(default_path),
+                         "has_state": _profile_has_state(default_path)}]
             if _RB_PROFILES_DIR.exists():
                 for d in sorted(_RB_PROFILES_DIR.iterdir()):
                     if d.is_dir() and not d.name.startswith("."):
-                        profiles.append({"name": d.name, "path": str(d)})
+                        profiles.append({"name": d.name, "path": str(d),
+                                         "has_state": _profile_has_state(d)})
             return self._json({"profiles": profiles, "active": _rb_profile})
 
         # POST /api/browser/profiles — create a new profile
@@ -14237,17 +14304,24 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/recordings — list all recordings in ~/.amux/recordings/
         if method == "GET" and path == "/api/recordings":
+            import json as _json
             recs = []
             if _RB_RECORDINGS_DIR.exists():
                 video_exts = {".mp4", ".webm", ".mov"}
                 for f in sorted(_RB_RECORDINGS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
                     if f.suffix.lower() in video_exts and f.is_file():
                         srt = f.with_suffix(".srt")
+                        meta_file = f.with_suffix(".json")
+                        meta = {}
+                        if meta_file.exists():
+                            try: meta = _json.loads(meta_file.read_text())
+                            except Exception: pass
                         st = f.stat()
                         recs.append({
                             "name": f.name, "path": str(f),
                             "size": st.st_size, "modified": int(st.st_mtime),
                             "srt": str(srt) if srt.exists() else None,
+                            "profile": meta.get("profile"), "task": meta.get("task"),
                         })
             return self._json({"recordings": recs, "dir": str(_RB_RECORDINGS_DIR)})
 
@@ -14313,10 +14387,17 @@ class CCHandler(BaseHTTPRequestHandler):
                     data_url = f"data:application/pdf;base64,{base64.b64encode(raw).decode()}"
                     return self._json({"path": str(p), "is_pdf": True, "data_url": data_url})
                 if ext in VIDEO_MIMES:
+                    import json as _json
                     srt_path = p.with_suffix(".srt")
+                    meta_file = p.with_suffix(".json")
+                    meta = {}
+                    if meta_file.exists():
+                        try: meta = _json.loads(meta_file.read_text())
+                        except Exception: pass
                     return self._json({"path": str(p), "is_video": True, "mime": VIDEO_MIMES[ext],
                                        "size": p.stat().st_size, "modified": int(p.stat().st_mtime),
-                                       "srt": str(srt_path) if srt_path.exists() else None})
+                                       "srt": str(srt_path) if srt_path.exists() else None,
+                                       "profile": meta.get("profile"), "task": meta.get("task")})
                 if ext in AUDIO_MIMES:
                     return self._json({"path": str(p), "is_audio": True, "mime": AUDIO_MIMES[ext], "size": p.stat().st_size})
                 # Detect other binary files (non-printable bytes in first 8KB)
