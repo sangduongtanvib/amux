@@ -7137,20 +7137,41 @@ function tagAcPick(i) {
 
 async function toggleYolo(session) {
   closeAllMenus();
-  await apiCall(API + '/api/sessions/' + session + '/config', {
+  const r = await apiCall(API + '/api/sessions/' + session + '/config', {
     method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ toggle_yolo: true })
   });
-  await fetchSessions();
+  if (r) {
+    // Optimistic update: flip the flag locally so render() shows the change immediately
+    const s = sessions.find(s => s.name === session);
+    if (s) {
+      const flag = '--dangerously-skip-permissions';
+      s.flags = (s.flags || '').includes(flag)
+        ? s.flags.replace(flag, '').trim()
+        : ((s.flags || '') + ' ' + flag).trim();
+      lastSessionsJSON = '';  // force fetchSessions to re-render
+      render();
+    }
+  }
+  fetchSessions();
 }
 
 async function toggleAutoContinue(session) {
   closeAllMenus();
-  await apiCall(API + '/api/sessions/' + session + '/config', {
+  const r = await apiCall(API + '/api/sessions/' + session + '/config', {
     method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ toggle_auto_continue: true })
   });
-  await fetchSessions();
+  if (r) {
+    // Optimistic update
+    const s = sessions.find(s => s.name === session);
+    if (s) {
+      s.auto_continue = !s.auto_continue;
+      lastSessionsJSON = '';  // force fetchSessions to re-render
+      render();
+    }
+  }
+  fetchSessions();
 }
 
 async function togglePin(session) {
