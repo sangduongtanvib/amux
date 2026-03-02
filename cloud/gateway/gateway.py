@@ -43,7 +43,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
     .logo { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.5px; color: #fff; }
     .logo span { color: #555; font-weight: 400; }
     #clerk-root { min-width: 320px; }
-    #status { color: #666; font-size: 0.85rem; min-height: 1.2em; }
+    #status { color: #aaa; font-size: 0.85rem; min-height: 1.2em; }
     .spinner {
       width: 18px; height: 18px;
       border: 2px solid #333; border-top-color: #aaa;
@@ -65,13 +65,13 @@ _LOGIN_HTML = """<!DOCTYPE html>
       document.getElementById('status').textContent = msg;
     }
 
-    async function exchangeAndRedirect() {
+    async function exchangeAndRedirect(clerk) {
       if (exchanging) return;
       exchanging = true;
       document.getElementById('clerk-root').innerHTML = '<div class="spinner"></div>';
       setStatus('Starting your workspace\u2026');
       try {
-        const token = await window.Clerk.session.getToken();
+        const token = await clerk.session.getToken();
         const res = await fetch('/api/cloud-auth', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -92,26 +92,25 @@ _LOGIN_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Pre-set key so Clerk auto-init finds it during IIFE execution
-    window.__clerk_publishable_key = PK;
-
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@4/dist/clerk.browser.js';
     s.onerror = () => setStatus('Failed to load auth library.');
     s.onload = async () => {
       try {
-        await window.Clerk.load();
+        setStatus('Initializing\u2026');
+        const ClerkClass = typeof window.Clerk === 'function' ? window.Clerk : null;
+        if (!ClerkClass) { setStatus('ERROR: window.Clerk=' + typeof window.Clerk); return; }
+        const clerk = new ClerkClass(PK);
+        await clerk.load();
+        setStatus('');
+        if (clerk.user) { await exchangeAndRedirect(clerk); return; }
+        clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
+        clerk.addListener(({ user }) => {
+          if (user && !exchanging) exchangeAndRedirect(clerk);
+        });
       } catch(e) {
-        // already loaded is fine
+        setStatus('ERROR: ' + e.message);
       }
-      if (window.Clerk.user) {
-        await exchangeAndRedirect();
-        return;
-      }
-      window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
-      window.Clerk.addListener(({ user }) => {
-        if (user && !exchanging) exchangeAndRedirect();
-      });
     };
     document.head.appendChild(s);
   </script>
