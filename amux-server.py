@@ -4614,10 +4614,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .offline-op .op-stale { color: var(--red); font-size: 0.65rem; font-style: italic; }
 
   /* Tab bar */
-  .tab-bar {
-    display: flex; gap: 0; margin: 0 -16px 12px -16px; padding: 0 0 0 16px;
+  .tab-bar-outer {
+    display: flex; align-items: stretch;
+    margin: 0 -16px 12px -16px;
     border-bottom: 1px solid var(--border);
     position: sticky; top: 60px; z-index: 39; background: var(--bg);
+  }
+  .tab-bar {
+    display: flex; gap: 0; padding: 0 0 0 16px; flex: 1;
     overflow-x: auto; -webkit-overflow-scrolling: touch; scroll-behavior: smooth;
   }
   .tab-bar::-webkit-scrollbar { display: none; }
@@ -4628,9 +4632,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
   }
-  .tab-bar button:last-child { border-right: none; }
   .tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-bar button:active { opacity: 0.7; }
+  .tab-customize-wrap {
+    position: relative; flex-shrink: 0; display: flex; align-items: center;
+    padding: 0 10px; border-left: 1px solid var(--border);
+  }
+  .tab-customize-btn {
+    background: none; border: none; cursor: pointer; font-size: 1rem; line-height: 1;
+    color: var(--dim); padding: 4px 2px; transition: color 0.15s;
+  }
+  .tab-customize-btn:hover { color: var(--fg); }
+  .tab-customizer-menu {
+    position: absolute; right: 0; top: calc(100% + 2px);
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    min-width: 150px; z-index: 200; padding: 6px 0;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  }
+  .tab-customizer-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+    font-size: 0.82rem; cursor: pointer; color: var(--fg); user-select: none;
+  }
+  .tab-customizer-item:hover { background: var(--hover); }
+  .tab-customizer-item.required { opacity: 0.45; cursor: not-allowed; }
+  .tab-customizer-item input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
 
   /* Logs view */
   .logs-toolbar {
@@ -5208,17 +5233,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
+<div class="tab-bar-outer">
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-reports" onclick="switchView('reports')">Reports</button>
-  <button id="tab-notifications" onclick="switchView('notifications')" style="display:none;">Notifications</button>
+  <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
   <button id="tab-email" onclick="switchView('email')">Email</button>
+</div>
+<div class="tab-customize-wrap">
+  <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
+  <div class="tab-customizer-menu" id="tab-customizer-menu" style="display:none;"></div>
+</div>
 </div>
 <div id="session-view">
 <div style="padding:0 12px;margin-top:4px;display:flex;align-items:center;gap:8px;">
@@ -7044,7 +7075,90 @@ function closeAllMenus() {
   }
   openMenu = null;
 }
-document.addEventListener('click', e => { closeAllMenus(); closeActiveDropdown(e); closeAddMenu(); });
+document.addEventListener('click', e => {
+  closeAllMenus(); closeActiveDropdown(e); closeAddMenu();
+  if (_tabCustomizerOpen && !e.target.closest('.tab-customize-wrap')) {
+    _tabCustomizerOpen = false;
+    const m = document.getElementById('tab-customizer-menu');
+    if (m) m.style.display = 'none';
+  }
+});
+
+const ALL_TABS = [
+  { id: 'sessions',      label: 'Sessions',   required: true },
+  { id: 'board',         label: 'Board' },
+  { id: 'calendar',      label: 'Calendar' },
+  { id: 'reports',       label: 'Reports' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'files',         label: 'Files' },
+  { id: 'logs',          label: 'Logs' },
+  { id: 'browser',       label: 'Browser' },
+  { id: 'grid',          label: 'Workspace' },
+  { id: 'email',         label: 'Email' },
+];
+
+let hiddenTabs = (function() {
+  try {
+    const s = localStorage.getItem('amux_hidden_tabs');
+    if (s !== null) return new Set(JSON.parse(s));
+  } catch(e) {}
+  return new Set(['notifications']); // default: notifications hidden
+})();
+
+function _saveHiddenTabs() {
+  localStorage.setItem('amux_hidden_tabs', JSON.stringify([...hiddenTabs]));
+}
+
+function _applyTabVisibility() {
+  ALL_TABS.forEach(t => {
+    const el = document.getElementById('tab-' + t.id);
+    if (el) el.style.display = hiddenTabs.has(t.id) ? 'none' : '';
+  });
+}
+
+let _tabCustomizerOpen = false;
+
+function toggleTabCustomizer() {
+  _tabCustomizerOpen = !_tabCustomizerOpen;
+  const menu = document.getElementById('tab-customizer-menu');
+  if (!menu) return;
+  if (_tabCustomizerOpen) {
+    _renderTabCustomizerMenu();
+    menu.style.display = '';
+  } else {
+    menu.style.display = 'none';
+  }
+}
+
+function _renderTabCustomizerMenu() {
+  const menu = document.getElementById('tab-customizer-menu');
+  if (!menu) return;
+  menu.innerHTML = ALL_TABS.map(t => {
+    const checked = !hiddenTabs.has(t.id);
+    const req = t.required ? ' required' : '';
+    const disabled = t.required ? ' disabled' : '';
+    return `<label class="tab-customizer-item${req}" onclick="event.stopPropagation()">
+      <input type="checkbox" ${checked ? 'checked' : ''}${disabled} onchange="toggleTabVisibility('${t.id}',this.checked)">
+      ${t.label}
+    </label>`;
+  }).join('');
+}
+
+function toggleTabVisibility(id, show) {
+  const tab = ALL_TABS.find(t => t.id === id);
+  if (!tab || tab.required) return;
+  if (show) {
+    hiddenTabs.delete(id);
+  } else {
+    // If hiding the currently active tab, switch to sessions first
+    const gridActive = id === 'grid' && document.getElementById('grid-view')?.classList.contains('active');
+    if (activeView === id || gridActive) switchView('sessions');
+    hiddenTabs.add(id);
+  }
+  _saveHiddenTabs();
+  _applyTabVisibility();
+  _renderTabCustomizerMenu();
+}
 
 function toggleArchived() {
   archivedExpanded = !archivedExpanded;
@@ -12245,7 +12359,7 @@ function _gpSafeId(name) {
 function enterGridMode() {
   const view = document.getElementById('grid-view');
   // Position below the tab bar so both header and tabs remain visible
-  const tabBar = document.querySelector('.tab-bar');
+  const tabBar = document.querySelector('.tab-bar-outer');
   const ref = tabBar || document.querySelector('.header-row');
   if (ref) {
     const rect = ref.getBoundingClientRect();
@@ -12680,10 +12794,11 @@ async function _runDeltaSync() {
 }
 // Run delta sync shortly after startup (after queue replay window)
 setTimeout(_runDeltaSync, 2500);
+_applyTabVisibility();
 (function() {
   function _syncTabTop() {
     const h = document.querySelector('.header-row');
-    const t = document.querySelector('.tab-bar');
+    const t = document.querySelector('.tab-bar-outer');
     if (h && t) t.style.top = h.offsetHeight + 'px';
   }
   _syncTabTop();

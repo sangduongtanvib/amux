@@ -60,7 +60,7 @@
  *     - Close peek → overlay inactive, body overflow restored
  *
  * MOBILE (iPhone 14, 390×844) flows covered:
- *   - Tab bar visible and sticky (.tab-bar)
+ *   - Tab bar visible and sticky (.tab-bar-outer)
  *   - All core tab buttons present (≥5: sessions/board/calendar/reports/notifications)
  *   - Sessions render as .card elements
  *   - Board: switch to kanban, ≥3 columns
@@ -534,7 +534,7 @@ async function runMobile(browser) {
   await page.screenshot({ path: '/tmp/amux_mobile_home.png' });
 
   // ── Tab bar ────────────────────────────────────────────────────────────────
-  const tabBar = await page.$('.tab-bar');
+  const tabBar = await page.$('.tab-bar-outer');
   log('Tab bar visible on mobile', !!(await tabBar?.isVisible()));
 
   const tabs = await page.$$('.tab-bar button');
@@ -544,7 +544,7 @@ async function runMobile(browser) {
   const visibleTabCount = visibleTabs.filter(Boolean).length;
   log('Core tab buttons present on mobile', visibleTabCount >= 3, `${visibleTabCount} tabs`);
 
-  // Tab bar is sticky — check it has a position style or top set
+  // Tab bar outer is sticky — check it has position sticky or fixed
   const tabTop = await tabBar?.evaluate(el => getComputedStyle(el).position);
   log('Tab bar is sticky/fixed on mobile', ['sticky','fixed'].includes(tabTop), `position: ${tabTop}`);
 
