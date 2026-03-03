@@ -5990,7 +5990,7 @@ async function toggleAutoCompact(checked) {
 // ═══════ STATE & GLOBALS ═══════
 const API = '';
 let sessions = [];
-let archivedExpanded = true;
+let archivedExpanded = false;
 let gitInfo = {};  // {sessionName: {branch, repo, _conflict}}
 let _initialLoad = true;   // true until first data arrives from server
 let _lastDataTime = null;  // timestamp of last successful data
