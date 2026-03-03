@@ -18,9 +18,10 @@ jobs:
       - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.CLOUD_SSH_KEY }}" > ~/.ssh/amux_cloud
+          printf '%s\n' "${{ secrets.CLOUD_SSH_KEY }}" > ~/.ssh/amux_cloud
           chmod 600 ~/.ssh/amux_cloud
           ssh-keyscan -H 5.161.66.217 >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Deploy amux-server.py (shared mount for all containers)
         run: |
