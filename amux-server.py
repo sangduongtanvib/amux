@@ -6699,6 +6699,10 @@ function render() {
         </div>` : ''}
         ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines" onclick="event.stopPropagation();openPeek('${s.name}')" style="cursor:pointer;">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
         <div class="card-stats" id="stats-${s.name}"></div>
+        ${!s.running ? `
+        <div style="padding:4px 0 2px;">
+          <button class="btn primary" style="width:100%;" onclick="event.stopPropagation();doStart('${s.name}')">&#x25B6; Start</button>
+        </div>` : ''}
         ${s.running ? `
         <div class="chips">
           <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
