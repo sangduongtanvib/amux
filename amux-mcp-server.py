@@ -651,15 +651,25 @@ def main():
                 
                 # Write response to stdout
                 print(json.dumps(response), flush=True)
+                debug_log(f"Response sent for {method} (id={message_id})")
                 
             except json.JSONDecodeError as e:
                 debug_log(f"Invalid JSON: {e}")
                 continue
+            except Exception as e:
+                debug_log(f"Unexpected error processing message: {e}")
+                import traceback
+                debug_log(traceback.format_exc())
+                continue
+        
+        debug_log("stdin closed, server exiting")
                 
     except KeyboardInterrupt:
-        debug_log("Server stopped")
+        debug_log("Server stopped by user")
     except Exception as e:
         debug_log(f"Fatal error: {e}")
+        import traceback
+        debug_log(traceback.format_exc())
         sys.exit(1)
 
 
