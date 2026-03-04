@@ -4,7 +4,7 @@
       "type": "stdio",
       "command": "python3",
       "args": [
-        "amux-mcp-server.py"
+        "/Users/sang.duongtan/Documents/research/amux/amux-mcp-server.py"
       ],
       "description": "AMUX orchestration - control and monitor AI coding sessions"
     },
@@ -17,24 +17,28 @@
       ]
     },
     "mixpeek": {
+      "type": "http",
       "url": "https://mcp.mixpeek.com/mcp",
       "headers": {
         "Authorization": "Bearer ${MIXPEEK_API_KEY}"
       }
     },
     "mixpeek-ingestion": {
+      "type": "http",
       "url": "https://mcp.mixpeek.com/ingestion/mcp",
       "headers": {
         "Authorization": "Bearer ${MIXPEEK_API_KEY}"
       }
     },
     "mixpeek-retrieval": {
+      "type": "http",
       "url": "https://mcp.mixpeek.com/retrieval/mcp",
       "headers": {
         "Authorization": "Bearer ${MIXPEEK_API_KEY}"
       }
     },
     "mixpeek-admin": {
+      "type": "http",
       "url": "https://mcp.mixpeek.com/admin/mcp",
       "headers": {
         "Authorization": "Bearer ${MIXPEEK_API_KEY}"
