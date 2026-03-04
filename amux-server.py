@@ -11316,7 +11316,9 @@ function openAddCredential() {
   document.getElementById('cred-account-id').value = '';
   document.getElementById('cred-api-key').value = '';
   document.getElementById('cred-oauth-token').value = '';
-  document.getElementById('add-credential-overlay').style.display = 'flex';
+  const overlay = document.getElementById('add-credential-overlay');
+  overlay.style.display = 'flex';
+  setTimeout(() => overlay.classList.add('active'), 10);
   document.getElementById('cred-account-id').focus();
 }
 
@@ -11327,13 +11329,17 @@ function openAddCredentialForTool(tool) {
   document.getElementById('cred-account-id').value = '';
   document.getElementById('cred-api-key').value = '';
   document.getElementById('cred-oauth-token').value = '';
-  document.getElementById('add-credential-overlay').style.display = 'flex';
+  const overlay = document.getElementById('add-credential-overlay');
+  overlay.style.display = 'flex';
+  setTimeout(() => overlay.classList.add('active'), 10);
   document.getElementById('cred-account-id').focus();
 }
 
 function closeAddCredential() {
   document.getElementById('cred-tool').disabled = false;
-  document.getElementById('add-credential-overlay').style.display = 'none';
+  const overlay = document.getElementById('add-credential-overlay');
+  overlay.classList.remove('active');
+  setTimeout(() => overlay.style.display = 'none', 250);
 }
 
 async function submitAddCredential() {
