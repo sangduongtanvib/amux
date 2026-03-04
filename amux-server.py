@@ -11379,7 +11379,7 @@ function closeAddCredential() {
   setTimeout(() => overlay.style.display = 'none', 250);
 }
 
-async function submit AddCredential() {
+async function submitAddCredential() {
   const tool = document.getElementById('cred-tool').value;
   const accountId = document.getElementById('cred-account-id').value.trim() || 'default';
   const authType = document.getElementById('cred-auth-type').value;
@@ -11667,17 +11667,137 @@ async function autoDetectCredentials() {
     const resp = await fetch(API + '/api/credentials/detect', {method: 'POST'});
     const result = await resp.json();
     
-    if (result.detected && result.detected.length > 0) {
-      alert(`Found ${result.detected.length} credential(s):\n\n${result.detected.join('\n')}`);
-      loadCredentials();
-    } else {
-      alert('No credentials auto-detected.\n\nPlease add them manually using the "+ Add Account" button.');
+    if (!result.detected || result.detected.length === 0) {
+      alert('❌ No credentials auto-detected.\n\n✅ Manual options:\n\n1. Cursor: Open ~/.cursor/cli-config.json and copy the token\n2. Claude Code: Get API key from console.anthropic.com\n3. Gemini: Get API key from aistudio.google.com\n4. Aider: Get OpenAI key from platform.openai.com\n\nSee "How to get API keys" for detailed instructions.');
+      btn.disabled = false;
+      btn.innerHTML = '&#x1F50D; Auto-Detect';
+      return;
     }
+    
+    // Show detected credentials in a modal
+    const modal = document.createElement('div');
+    modal.className = 'board-edit-overlay';
+    modal.style.zIndex = '2000';
+    
+    let items = result.detected.map((cred, idx) => {
+      const toolLabel = {
+        cursor: 'Cursor',
+        claude_code: 'Claude Code',
+        gemini: 'Gemini',
+        aider: 'Aider'
+      }[cred.tool] || cred.tool;
+      
+      const typeLabel = {
+        oauth: 'OAuth Token',
+        api_key: 'API Key',
+        session: 'Session Token'
+      }[cred.type] || cred.type;
+      
+      return `
+        <div style="padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--card-bg);">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <input type="checkbox" id="auto-cred-${idx}" checked style="width:16px;height:16px;">
+            <strong style="font-size:0.9rem;">${toolLabel}</strong>
+            <span style="font-size:0.75rem;padding:2px 6px;border-radius:4px;background:var(--accent);color:#000;">${typeLabel}</span>
+          </div>
+          <div style="font-size:0.75rem;color:var(--dim);margin-left:24px;">
+            <div>📁 Source: <code style="font-size:0.7rem;">${cred.source}</code></div>
+            <div style="margin-top:4px;">🔑 Preview: <code style="font-size:0.7rem;">${cred.preview}</code></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+    
+    modal.innerHTML = `
+    <div class="board-edit-modal" style="max-width:520px;max-height:80vh;overflow-y:auto;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <h3 style="margin:0;font-size:1.1rem;">✅ Auto-Detected Credentials (${result.detected.length})</h3>
+        <button onclick="this.closest('.board-edit-overlay').remove()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--dim);">×</button>
+      </div>
+      
+      <div style="margin-bottom:16px;padding:10px;background:rgba(88,166,255,0.08);border-radius:6px;font-size:0.78rem;color:var(--dim);">
+        💡 <strong>Select credentials to import.</strong> Unchecked items will be skipped.
+      </div>
+      
+      ${items}
+      
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn primary" onclick="importDetectedCredentials(${JSON.stringify(result.detected).replace(/"/g, '&quot;')})" style="flex:1;">
+          Import Selected
+        </button>
+        <button class="btn" onclick="this.closest('.board-edit-overlay').remove()" style="flex:1;">
+          Cancel
+        </button>
+      </div>
+    </div>
+    `;
+    
+    document.body.appendChild(modal);
   } catch(e) {
-    alert('Auto-detection failed: ' + e.message);
+    alert('❌ Auto-detection failed:\n\n' + e.message + '\n\nPlease add credentials manually.');
   } finally {
     btn.disabled = false;
     btn.innerHTML = '&#x1F50D; Auto-Detect';
+  }
+}
+
+// Import selected detected credentials
+async function importDetectedCredentials(allCredentials) {
+  const checkboxes = document.querySelectorAll('[id^="auto-cred-"]');
+  const selected = [];
+  
+  checkboxes.forEach((cb, idx) => {
+    if (cb.checked && allCredentials[idx]) {
+      selected.push(allCredentials[idx]);
+    }
+  });
+  
+  if (selected.length === 0) {
+    alert('⚠️ No credentials selected.');
+    return;
+  }
+  
+  let imported = 0;
+  let errors = [];
+  
+  for (const cred of selected) {
+    try {
+      const credentials = {};
+      
+      // Map detected type to credential field
+      if (cred.type === 'oauth') {
+        credentials.oauth_token = cred.value;
+      } else if (cred.type === 'api_key') {
+        if (cred.tool === 'claude_code') credentials.anthropic_api_key = cred.value;
+        else if (cred.tool === 'gemini') credentials.google_api_key = cred.value;
+        else if (cred.tool === 'aider') credentials.openai_api_key = cred.value;
+      } else if (cred.type === 'session') {
+        credentials.session_token = cred.value;
+      }
+      
+      const resp = await fetch(API + `/api/credentials/${cred.tool}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          account_id: 'auto-detected',
+          credentials
+        })
+      });
+      
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      imported++;
+    } catch(e) {
+      errors.push(`${cred.tool}: ${e.message}`);
+    }
+  }
+  
+  document.querySelector('.board-edit-overlay')?.remove();
+  
+  if (imported > 0) {
+    alert(`✅ Successfully imported ${imported} credential(s)!${errors.length > 0 ? '\n\n⚠️ Failed:\n' + errors.join('\n') : ''}`);
+    loadCredentials();
+  } else {
+    alert('❌ Failed to import credentials:\n\n' + errors.join('\n'));
   }
 }
 
@@ -16488,6 +16608,68 @@ class CCHandler(BaseHTTPRequestHandler):
                 try:
                     _cm.set_load_balancing(tool, enabled, strategy)
                     return self._json({"ok": True, "tool": tool, "enabled": enabled, "strategy": strategy})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/credentials/detect — auto-detect credentials from config files
+            if method == "POST" and path == "/api/credentials/detect":
+                detected = []
+                try:
+                    import json as _json
+                    home = _Path.home()
+                    
+                    # Detect Cursor OAuth token
+                    cursor_config = home / ".cursor" / "cli-config.json"
+                    if cursor_config.exists():
+                        try:
+                            with open(cursor_config) as f:
+                                data = _json.load(f)
+                                token = data.get("token")
+                                if token:
+                                    detected.append({
+                                        "tool": "cursor",
+                                        "type": "oauth",
+                                        "value": token,
+                                        "source": str(cursor_config),
+                                        "preview": token[:20] + "..." if len(token) > 20 else token
+                                    })
+                        except Exception as e:
+                            pass
+                    
+                    # Detect Anthropic API key from env
+                    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+                    if anthropic_key:
+                        detected.append({
+                            "tool": "claude_code",
+                            "type": "api_key",
+                            "value": anthropic_key,
+                            "source": "ANTHROPIC_API_KEY env var",
+                            "preview": anthropic_key[:15] + "..." if len(anthropic_key) > 15 else anthropic_key
+                        })
+                    
+                    # Detect Gemini API key from env
+                    gemini_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+                    if gemini_key:
+                        detected.append({
+                            "tool": "gemini",
+                            "type": "api_key",
+                            "value": gemini_key,
+                            "source": "GOOGLE_API_KEY/GEMINI_API_KEY env var",
+                            "preview": gemini_key[:15] + "..." if len(gemini_key) > 15 else gemini_key
+                        })
+                    
+                    # Detect OpenAI API key from env (for Aider)
+                    openai_key = os.environ.get("OPENAI_API_KEY")
+                    if openai_key:
+                        detected.append({
+                            "tool": "aider",
+                            "type": "api_key",
+                            "value": openai_key,
+                            "source": "OPENAI_API_KEY env var",
+                            "preview": openai_key[:15] + "..." if len(openai_key) > 15 else openai_key
+                        })
+                    
+                    return self._json({"detected": detected, "count": len(detected)})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 

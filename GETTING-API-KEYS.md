@@ -1,6 +1,30 @@
 # Hướng Dẫn Lấy API Keys và Authentication
 
-## 📋 Tổng Quan
+## � Auto-Detect (Khuyến Nghị)
+
+**Cách nhanh nhất:** AMUX có thể tự động tìm credentials đã có sẵn trên máy!
+
+### Cách sử dụng:
+
+1. Mở AMUX dashboard → tab **Credentials**
+2. Click nút **🔍 Auto-Detect** (góc trên bên phải)
+3. AMUX sẽ quét và tìm:
+   - **Cursor**: OAuth token từ `~/.cursor/cli-config.json`
+   - **Claude Code**: API key từ env var `ANTHROPIC_API_KEY`
+   - **Gemini**: API key từ env var `GOOGLE_API_KEY` hoặc `GEMINI_API_KEY`
+   - **Aider**: API key từ env var `OPENAI_API_KEY`
+4. Chọn credentials muốn import → Click **Import Selected**
+
+### Khi nào cần Manual Setup:
+
+- Chưa cài AI tool nào
+- Muốn dùng account khác
+- Config files không có token (chưa login)
+- Cần setup multi-account với load balancing
+
+---
+
+## �📋 Tổng Quan
 
 AMUX hỗ trợ nhiều phương thức authentication cho các AI tools khác nhau:
 
