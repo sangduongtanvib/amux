@@ -5640,14 +5640,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <label class="field-label">OAuth Token</label>
         <div style="display:flex;gap:8px;margin-bottom:8px;">
           <button type="button" class="btn" onclick="openBrowserLogin()" style="font-size:0.75rem;padding:6px 10px;flex:1;">
-            🌐 Login via Browser
+            ❓ How to Get Token
           </button>
-          <button type="button" class="btn" onclick="pasteFromConfig()" style="font-size:0.75rem;padding:6px 10px;flex:1;">
-            📋 Paste from Config
+          <button type="button" class="btn" onclick="document.getElementById('cred-auth-type').value='api_key'; updateAuthFields();" style="font-size:0.75rem;padding:6px 10px;flex:1;">
+            🔑 Use API Key Instead
           </button>
         </div>
-        <textarea id="cred-oauth-token" placeholder='{"access_token": "..."}' rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
-        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">OAuth token from config file or authorization flow</div>
+        <textarea id="cred-oauth-token" placeholder='Paste OAuth token here (if available from Keychain or other source)' rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
+        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">⚠️ OAuth tokens are not easily accessible. Consider using API Key instead.</div>
       </div>
       
       <div style="display:flex;gap:8px;margin-top:14px;">
@@ -11825,46 +11825,51 @@ function openBrowserLogin() {
     modal.style.cssText = 'z-index: 2500; background: rgba(0,0,0,0.6); pointer-events: auto;';
     
     modal.innerHTML = `
-    <div class="board-edit-modal" style="max-width:600px;">
+    <div class="board-edit-modal" style="max-width:620px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-        <h3 style="margin:0;font-size:1.1rem;">🌐 Cursor OAuth Login</h3>
+        <h3 style="margin:0;font-size:1.1rem;">🔐 Cursor Authentication</h3>
         <button onclick="this.closest('.board-edit-overlay').remove()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--dim);">×</button>
       </div>
       
-      <div style="padding:14px;background:rgba(88,166,255,0.08);border-radius:10px;margin-bottom:16px;">
-        <div style="font-size:0.85rem;margin-bottom:10px;">✨ <strong>Browser-based login</strong> works like Cursor CLI:</div>
-        <ol style="font-size:0.8rem;color:var(--dim);margin:8px 0 8px 20px;padding:0;line-height:1.6;">
-          <li>Click <strong>"Open Cursor Login"</strong> below</li>
-          <li>Login with your Cursor account</li>
-          <li>After login, check <code style="font-size:0.75rem;">~/.cursor/cli-config.json</code></li>
-          <li>Copy the <strong>token</strong> field value</li>
-          <li>Paste into the OAuth Token field</li>
-        </ol>
+      <div style="padding:14px;background:rgba(255,152,0,0.1);border-left:3px solid #ff9800;border-radius:6px;margin-bottom:16px;">
+        <div style="font-size:0.85rem;font-weight:600;margin-bottom:6px;">⚠️ OAuth Token Not Available</div>
+        <div style="font-size:0.78rem;color:var(--dim);line-height:1.6;">
+          Cursor's OAuth tokens are stored securely and not directly accessible from config files. 
+          They may be in macOS Keychain or encrypted storage.
+        </div>
       </div>
       
-      <div style="display:flex;gap:10px;margin-bottom:16px;">
-        <button class="btn primary" onclick="window.open('https://cursor.com/settings', '_blank')" style="flex:1;">
-          🌐 Open Cursor Login
-        </button>
-        <button class="btn" onclick="showConfigHelp()" style="flex:1;">
-          📝 Show Config Path
+      <div style="padding:14px;background:rgba(76,175,80,0.08);border-radius:10px;margin-bottom:16px;">
+        <div style="font-size:0.85rem;font-weight:600;margin-bottom:8px;">✅ Recommended: Use API Key Instead</div>
+        <div style="font-size:0.78rem;color:var(--dim);margin-bottom:10px;line-height:1.6;">
+          1. Close this dialog<br>
+          2. Select <strong>"API Key"</strong> as Authentication Type<br>
+          3. Get your API key from <a href="https://cursor.com/settings" target="_blank" style="color:var(--accent);text-decoration:underline;">Cursor Settings</a><br>
+          4. Paste it into the API Key field
+        </div>
+        <button class="btn primary" onclick="window.open('https://cursor.com/settings', '_blank')" style="font-size:0.75rem;padding:6px 12px;">
+          🌐 Open Cursor Settings
         </button>
       </div>
       
       <div style="padding:12px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;">
-        <div style="font-size:0.75rem;color:var(--dim);margin-bottom:6px;">💡 <strong>Quick method:</strong></div>
-        <code style="font-size:0.7rem;display:block;padding:8px;background:rgba(0,0,0,0.3);border-radius:4px;overflow-x:auto;">
-cat ~/.cursor/cli-config.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4
-        </code>
-        <div style="font-size:0.68rem;color:var(--dim);margin-top:6px;">Run this in terminal to extract token directly</div>
+        <div style="font-size:0.78rem;font-weight:600;margin-bottom:8px;">🔍 Advanced: Check macOS Keychain</div>
+        <div style="font-size:0.75rem;color:var(--dim);line-height:1.5;">
+          If you need the OAuth token:<br>
+          1. Open <strong>Keychain Access</strong> app<br>
+          2. Search for "cursor" or "cursor.com"<br>
+          3. Look for authentication credentials
+        </div>
       </div>
       
-      <div style="padding:10px;background:rgba(255,193,7,0.1);border-left:3px solid #ffc107;border-radius:4px;font-size:0.75rem;color:var(--dim);">
-        ⚠️ <strong>Note:</strong> Full OAuth callback flow (like Cursor CLI's deep control link) coming soon!
+      <div style="padding:10px;background:rgba(88,166,255,0.08);border-left:3px solid #58a6ff;border-radius:4px;font-size:0.75rem;margin-bottom:12px;">
+        💡 <strong>Coming Soon:</strong> Full OAuth callback flow (like Cursor CLI's deep control link)
       </div>
       
       <div style="margin-top:16px;text-align:center;">
-        <button class="btn" onclick="this.closest('.board-edit-overlay').remove()">Close</button>
+        <button class="btn primary" onclick="this.closest('.board-edit-overlay').remove()" style="padding:8px 24px;">
+          Got it!
+        </button>
       </div>
     </div>
     `;
