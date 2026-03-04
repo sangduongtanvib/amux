@@ -524,7 +524,7 @@ MCP_TOOLS = {
 def handle_initialize(params: Dict) -> Dict:
     """Handle MCP initialize request."""
     return {
-        "protocolVersion": "0.1.0",
+        "protocolVersion": "2024-11-05",
         "serverInfo": {
             "name": "amux-mcp-server",
             "version": "1.0.0"
