@@ -19,6 +19,7 @@ import json
 import os
 import base64
 import hashlib
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from cryptography.fernet import Fernet
@@ -125,7 +126,7 @@ class CredentialManager:
         self.CREDS_FILE.write_bytes(encrypted_data)
         self.CREDS_FILE.chmod(0o600)  # Owner read/write only
     
-    def set_credential(self, tool: str, cred_type: str, value: str):
+    def set_credential(self, tool: str, cred_type: str, value: str, account_id: str = "default"):
         """
         Set a credential for a tool.
         
@@ -133,51 +134,227 @@ class CredentialManager:
             tool: Tool name (e.g., "claude_code", "cursor")
             cred_type: Credential type (e.g., "api_key", "oauth_token")
             value: Credential value
+            account_id: Account identifier for multi-account support
         """
         creds = self._load_credentials()
         
         if tool not in creds:
-            creds[tool] = {}
+            creds[tool] = {"accounts": {}, "load_balancer": {"enabled": False, "strategy": "round_robin"}}
         
-        creds[tool][cred_type] = value
+        if "accounts" not in creds[tool]:
+            creds[tool]["accounts"] = {}
+        
+        if account_id not in creds[tool]["accounts"]:
+            creds[tool]["accounts"][account_id] = {
+                "credentials": {},
+                "metadata": {
+                    "created": int(time.time()),
+                    "name": account_id,
+                    "enabled": True,
+                    "usage_count": 0,
+                    "last_used": None
+                }
+            }
+        
+        creds[tool]["accounts"][account_id]["credentials"][cred_type] = value
+        creds[tool]["accounts"][account_id]["metadata"]["updated"] = int(time.time())
+        
         self._save_credentials(creds)
         
-        print(f"✅ Credential '{cred_type}' saved for {tool}")
+        print(f"✅ Credential '{cred_type}' saved for {tool} (account: {account_id})")
     
-    def get_credential(self, tool: str, cred_type: str) -> Optional[str]:
+    def get_credential(self, tool: str, cred_type: str, account_id: str = "default") -> Optional[str]:
         """Get a credential for a tool."""
         creds = self._load_credentials()
-        return creds.get(tool, {}).get(cred_type)
+        tool_creds = creds.get(tool, {})
+        if "accounts" in tool_creds:
+            return tool_creds["accounts"].get(account_id, {}).get("credentials", {}).get(cred_type)
+        # Legacy format support
+        return tool_creds.get(cred_type)
     
-    def delete_credential(self, tool: str, cred_type: str):
-        """Delete a credential."""
+    def list_accounts(self, tool: str) -> List[Dict[str, Any]]:
+        """List all accounts for a tool."""
+        creds = self._load_credentials()
+        tool_creds = creds.get(tool, {})
+        
+        if "accounts" not in tool_creds:
+            return []
+        
+        accounts = []
+        for account_id, account_data in tool_creds["accounts"].items():
+            metadata = account_data.get("metadata", {})
+            accounts.append({
+                "id": account_id,
+                "name": metadata.get("name", account_id),
+                "enabled": metadata.get("enabled", True),
+                "usage_count": metadata.get("usage_count", 0),
+                "last_used": metadata.get("last_used"),
+                "created": metadata.get("created"),
+                "has_credentials": len(account_data.get("credentials", {})) > 0
+            })
+        
+        return accounts
+    
+    def delete_account(self, tool: str, account_id: str):
+        """Delete an account."""
         creds = self._load_credentials()
         
-        if tool in creds and cred_type in creds[tool]:
-            del creds[tool][cred_type]
-            if not creds[tool]:  # Remove tool if no creds left
-                del creds[tool]
-            self._save_credentials(creds)
-            print(f"✅ Credential '{cred_type}' deleted for {tool}")
-        else:
-            print(f"❌ Credential not found: {tool}.{cred_type}")
+        if tool in creds and "accounts" in creds[tool]:
+            if account_id in creds[tool]["accounts"]:
+                del creds[tool]["accounts"][account_id]
+                self._save_credentials(creds)
+                print(f"✅ Account '{account_id}' deleted from {tool}")
+                return True
+        
+        return False
     
-    def list_credentials(self) -> Dict[str, List[str]]:
-        """List all stored credentials (keys only, not values)."""
+    def set_load_balancing(self, tool: str, enabled: bool, strategy: str = "round_robin"):
+        """Enable/disable load balancing for a tool."""
         creds = self._load_credentials()
-        return {
-            tool: list(cred_dict.keys())
-            for tool, cred_dict in creds.items()
-        }
+        
+        if tool not in creds:
+            creds[tool] = {"accounts": {}, "load_balancer": {}}
+        
+        if "load_balancer" not in creds[tool]:
+            creds[tool]["load_balancer"] = {}
+        
+        creds[tool]["load_balancer"]["enabled"] = enabled
+        creds[tool]["load_balancer"]["strategy"] = strategy
+        creds[tool]["load_balancer"]["current_index"] = 0
+        
+        self._save_credentials(creds)
+        print(f"✅ Load balancing {'enabled' if enabled else 'disabled'} for {tool} (strategy: {strategy})")
     
-    def get_env_vars(self, tool: str) -> Dict[str, str]:
+    def get_next_account(self, tool: str) -> Optional[Dict[str, Any]]:
         """
-        Get environment variables for a tool.
+        Get next account to use (load balancing).
         
-        Returns a dict of env var name -> value to inject into session.
+        Returns account with credentials and increments usage.
         """
         creds = self._load_credentials()
         tool_creds = creds.get(tool, {})
+        
+        if "accounts" not in tool_creds or not tool_creds["accounts"]:
+            return None
+        
+        load_balancer = tool_creds.get("load_balancer", {})
+        enabled_accounts = [
+            (aid, acc) for aid, acc in tool_creds["accounts"].items()
+            if acc.get("metadata", {}).get("enabled", True)
+        ]
+        
+        if not enabled_accounts:
+            return None
+        
+        # Load balancing strategies
+        if load_balancer.get("enabled", False):
+            strategy = load_balancer.get("strategy", "round_robin")
+            
+            if strategy == "round_robin":
+                current_idx = load_balancer.get("current_index", 0)
+                account_id, account_data = enabled_accounts[current_idx % len(enabled_accounts)]
+                # Update index for next call
+                creds[tool]["load_balancer"]["current_index"] = (current_idx + 1) % len(enabled_accounts)
+            
+            elif strategy == "least_used":
+                # Sort by usage_count
+                enabled_accounts.sort(key=lambda x: x[1].get("metadata", {}).get("usage_count", 0))
+                account_id, account_data = enabled_accounts[0]
+            
+            else:  # random
+                import random
+                account_id, account_data = random.choice(enabled_accounts)
+        else:
+            # No load balancing - use first enabled account (or "default")
+            if "default" in tool_creds["accounts"] and tool_creds["accounts"]["default"]["metadata"]["enabled"]:
+                account_id = "default"
+                account_data = tool_creds["accounts"]["default"]
+            else:
+                account_id, account_data = enabled_accounts[0]
+        
+        # Update usage statistics
+        metadata = account_data.get("metadata", {})
+        metadata["usage_count"] = metadata.get("usage_count", 0) + 1
+        metadata["last_used"] = int(time.time())
+        
+        self._save_credentials(creds)
+        
+        return {
+            "id": account_id,
+            "credentials": account_data.get("credentials", {}),
+            "metadata": metadata
+        }
+    
+    def delete_credential(self, tool: str, cred_type: str, account_id: str = "default"):
+        """Delete a specific credential type from an account (deprecated - use delete_account instead)."""
+        creds = self._load_credentials()
+        
+        if tool in creds:
+            tool_data = creds[tool]
+            if "accounts" in tool_data and account_id in tool_data["accounts"]:
+                account = tool_data["accounts"][account_id]
+                if cred_type in account.get("credentials", {}):
+                    del account["credentials"][cred_type]
+                    if not account["credentials"]:  # Remove account if no creds left
+                        del tool_data["accounts"][account_id]
+                    if not tool_data["accounts"]:  # Remove tool if no accounts left
+                        del creds[tool]
+                    self._save_credentials(creds)
+                    print(f"✅ Credential '{cred_type}' deleted for {tool}.{account_id}")
+                    return
+        
+        print(f"❌ Credential not found: {tool}.{account_id}.{cred_type}")
+    
+    def list_credentials(self) -> Dict[str, Dict]:
+        """
+        List all stored credentials with account information.
+        
+        Returns:
+            {
+                "tool_name": {
+                    "accounts": ["account_id1", "account_id2"],
+                    "load_balancing": {"enabled": bool, "strategy": str}
+                }
+            }
+        """
+        creds = self._load_credentials()
+        result = {}
+        
+        for tool, tool_data in creds.items():
+            if "accounts" in tool_data:
+                result[tool] = {
+                    "accounts": list(tool_data["accounts"].keys()),
+                    "load_balancing": tool_data.get("load_balancer", {
+                        "enabled": False,
+                        "strategy": "round_robin"
+                    })
+                }
+        
+        return result
+    
+    def get_env_vars(self, tool: str, account_id: Optional[str] = None) -> Dict[str, str]:
+        """
+        Get environment variables for a tool using load balancing.
+        
+        Args:
+            tool: Tool name
+            account_id: Optional specific account ID. If None, uses load balancing
+            
+        Returns a dict of env var name -> value to inject into session.
+        """
+        # Get account (either specific or via load balancing)
+        if account_id:
+            account_data = self.get_credential(tool, account_id=account_id)
+            if not account_data:
+                print(f"⚠️  Account {account_id} not found for {tool}, using load balancing")
+                account_data = self.get_next_account(tool)
+        else:
+            account_data = self.get_next_account(tool)
+        
+        if not account_data:
+            return {}
+        
+        tool_creds = account_data.get("credentials", {})
         env_vars = {}
         
         # Map credentials to environment variables
