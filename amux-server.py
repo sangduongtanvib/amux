@@ -5223,6 +5223,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     background: var(--card); border: 1px solid var(--border);
     border-radius: 12px; padding: 16px; width: 100%; max-width: 400px;
   }
+  .board-edit-modal {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; width: 100%; max-width: 400px;
+    pointer-events: auto;
+  }
   .board-edit-box input, .board-edit-box textarea, .board-edit-box select {
     width: 100%; padding: 8px 10px; border-radius: 8px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
@@ -11685,7 +11690,7 @@ async function autoDetectCredentials() {
     // Show detected credentials in a modal
     const modal = document.createElement('div');
     modal.className = 'board-edit-overlay';
-    modal.style.zIndex = '2000';
+    modal.style.cssText = 'z-index: 2000; background: rgba(0,0,0,0.6); pointer-events: auto;';
     
     let items = result.detected.map((cred, idx) => {
       const toolLabel = {
@@ -11817,7 +11822,7 @@ function openBrowserLogin() {
     // Show Cursor OAuth helper
     const modal = document.createElement('div');
     modal.className = 'board-edit-overlay';
-    modal.style.zIndex = '2500';
+    modal.style.cssText = 'z-index: 2500; background: rgba(0,0,0,0.6); pointer-events: auto;';
     
     modal.innerHTML = `
     <div class="board-edit-modal" style="max-width:600px;">
@@ -11874,7 +11879,7 @@ cat ~/.cursor/cli-config.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4
 function showConfigHelp() {
   const modal = document.createElement('div');
   modal.className = 'board-edit-overlay';
-  modal.style.zIndex = '2600';
+  modal.style.cssText = 'z-index: 2600; background: rgba(0,0,0,0.6); pointer-events: auto;';
   
   modal.innerHTML = `
   <div class="board-edit-modal" style="max-width:550px;">
@@ -11917,7 +11922,7 @@ function showConfigHelp() {
 function pasteFromConfig() {
   const modal = document.createElement('div');
   modal.className = 'board-edit-overlay';
-  modal.style.zIndex = '2500';
+  modal.style.cssText = 'z-index: 2600; background: rgba(0,0,0,0.6); pointer-events: auto;';
   
   modal.innerHTML = `
   <div class="board-edit-modal" style="max-width:550px;">
