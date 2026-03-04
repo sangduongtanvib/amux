@@ -5571,40 +5571,72 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     <span style="font-weight:600;font-size:0.85rem;color:var(--text);">Credential Management</span>
     <div style="flex:1;"></div>
+    <button class="btn" onclick="autoDetectCredentials()" style="font-size:0.78rem;padding:4px 10px;background:var(--green);color:#000;">&#x1F50D; Auto-Detect</button>
     <button class="btn" onclick="openAddCredential()" style="font-size:0.78rem;padding:4px 10px;">+ Add Account</button>
   </div>
   <div style="margin:0 12px 8px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
     Manage API keys and authentication for AI tools. <strong style="color:var(--text);">Load balancing</strong> distributes requests across multiple accounts to avoid rate limits.
-    <span style="display:block;margin-top:4px;">Credentials are encrypted with AES-128 and stored in <code style="color:var(--accent);">~/.amux/credentials/</code></span>
+    <span style="display:block;margin-top:6px;">Credentials are encrypted with AES-128 and stored in <code style="color:var(--accent);">~/.amux/credentials/</code></span>
+    <span style="display:block;margin-top:6px;">
+      <strong style="color:var(--text);">Need help?</strong> 
+      <a href="#" onclick="event.preventDefault();openCredentialsGuide()" style="color:var(--accent);text-decoration:underline;">How to get API keys →</a>
+    </span>
   </div>
   <div id="credentials-tools-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:12px;"></div>
   
   <!-- Add/Edit Credential Modal -->
   <div id="add-credential-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeAddCredential()" style="display:none;">
-    <div class="board-edit-box" style="max-width:480px;">
+    <div class="board-edit-box" style="max-width:520px;">
       <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;" id="cred-modal-title">Add Account</div>
+      
       <div class="field-group">
         <label class="field-label">Tool</label>
-        <select id="cred-tool" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem;">
-          <option value="claude_code">Claude Code</option>
+        <select id="cred-tool" onchange="updateCredentialForm()" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem;">
+          <option value="claude_code">Claude Code (Anthropic)</option>
           <option value="cursor">Cursor</option>
-          <option value="gemini">Gemini</option>
+          <option value="gemini">Google Gemini</option>
           <option value="aider">Aider</option>
         </select>
       </div>
+      
+      <div class="field-group">
+        <label class="field-label">Authentication Type</label>
+        <select id="cred-auth-type" onchange="updateCredentialInputs()" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem;">
+          <option value="api_key">API Key</option>
+          <option value="session">Session Token</option>
+          <option value="oauth">OAuth Token</option>
+        </select>
+      </div>
+      
+      <!-- Help text per tool -->
+      <div id="cred-help-text" style="padding:8px 10px;background:rgba(88,166,255,0.1);border:1px solid rgba(88,166,255,0.3);border-radius:6px;font-size:0.72rem;color:var(--text);line-height:1.5;margin-bottom:10px;">
+        <strong>Claude Code:</strong> Get API key from <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent);text-decoration:underline;">Anthropic Console</a>
+      </div>
+      
       <div class="field-group">
         <label class="field-label">Account ID</label>
-        <input id="cred-account-id" type="text" placeholder="default, account1, user@example.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
-        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">Unique identifier for this account (e.g., email or name)</div>
+        <input id="cred-account-id" type="text" placeholder="e.g., work-account, user@example.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
+        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">Unique identifier for this account (used in load balancing)</div>
       </div>
+      
       <div class="field-group" id="cred-api-key-group">
         <label class="field-label">API Key</label>
-        <input id="cred-api-key" type="password" placeholder="sk-ant-..." autocomplete="off" style="width:100%;box-sizing:border-box;font-family:monospace;">
+        <input id="cred-api-key" type="password" placeholder="sk-ant-api03-..." autocomplete="off" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.8rem;">
+        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">Your API key will be encrypted with AES-128</div>
       </div>
+      
+      <div class="field-group" id="cred-session-group" style="display:none;">
+        <label class="field-label">Session Token</label>
+        <textarea id="cred-session-token" placeholder="Paste session token from browser cookies..." rows="3" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
+        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">Extract from browser DevTools → Application → Cookies</div>
+      </div>
+      
       <div class="field-group" id="cred-oauth-group" style="display:none;">
         <label class="field-label">OAuth Token</label>
-        <textarea id="cred-oauth-token" placeholder="{...}" rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
+        <textarea id="cred-oauth-token" placeholder='{"access_token": "..."}' rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
+        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">OAuth token from config file or authorization flow</div>
       </div>
+      
       <div style="display:flex;gap:8px;margin-top:14px;">
         <button class="btn" onclick="closeAddCredential()" style="flex:1;">Cancel</button>
         <button class="btn primary" onclick="submitAddCredential()" style="flex:1;">Save</button>
@@ -11313,9 +11345,12 @@ async function renderCredentials() {
 function openAddCredential() {
   document.getElementById('cred-modal-title').textContent = 'Add Account';
   document.getElementById('cred-tool').value = 'claude_code';
+  document.getElementById('cred-tool').disabled = false;
   document.getElementById('cred-account-id').value = '';
   document.getElementById('cred-api-key').value = '';
+  document.getElementById('cred-session-token').value = '';
   document.getElementById('cred-oauth-token').value = '';
+  updateCredentialForm();
   const overlay = document.getElementById('add-credential-overlay');
   overlay.style.display = 'flex';
   setTimeout(() => overlay.classList.add('active'), 10);
@@ -11328,7 +11363,9 @@ function openAddCredentialForTool(tool) {
   document.getElementById('cred-tool').disabled = true;
   document.getElementById('cred-account-id').value = '';
   document.getElementById('cred-api-key').value = '';
+  document.getElementById('cred-session-token').value = '';
   document.getElementById('cred-oauth-token').value = '';
+  updateCredentialForm();
   const overlay = document.getElementById('add-credential-overlay');
   overlay.style.display = 'flex';
   setTimeout(() => overlay.classList.add('active'), 10);
@@ -11342,24 +11379,56 @@ function closeAddCredential() {
   setTimeout(() => overlay.style.display = 'none', 250);
 }
 
-async function submitAddCredential() {
+async function submit AddCredential() {
   const tool = document.getElementById('cred-tool').value;
   const accountId = document.getElementById('cred-account-id').value.trim() || 'default';
+  const authType = document.getElementById('cred-auth-type').value;
   const apiKey = document.getElementById('cred-api-key').value.trim();
+  const sessionToken = document.getElementById('cred-session-token').value.trim();
   const oauthToken = document.getElementById('cred-oauth-token').value.trim();
   
-  if (!apiKey && !oauthToken) {
+  const credentials = {};
+  
+  // Map auth type to credential fields
+  if (authType === 'api_key') {
+    if (!apiKey) {
+      alert('Please provide an API key');
+      return;
+    }
+    if (tool === 'claude_code') credentials.anthropic_api_key = apiKey;
+    else if (tool === 'gemini') credentials.google_api_key = apiKey;
+    else if (tool === 'aider') credentials.openai_api_key = apiKey;
+  } else if (authType === 'anthropic_key') {
+    if (!apiKey) {
+      alert('Please provide an API key');
+      return;
+    }
+    credentials.anthropic_api_key = apiKey;
+  } else if (authType === 'session') {
+    if (!sessionToken) {
+      alert('Please provide a session token');
+      return;
+    }
+    credentials.session_token = sessionToken;
+  } else if (authType === 'oauth') {
+    if (!oauthToken) {
+      alert('Please provide an OAuth token');
+      return;
+    }
+    try {
+      // Try to parse as JSON
+      JSON.parse(oauthToken);
+      credentials.oauth_token = oauthToken;
+    } catch(e) {
+      // If not JSON, store as string
+      credentials.oauth_token = oauthToken;
+    }
+  }
+  
+  if (Object.keys(credentials).length === 0) {
     alert('Please provide credentials');
     return;
   }
-  
-  const credentials = {};
-  if (apiKey) {
-    if (tool === 'claude_code' || tool === 'aider') credentials.anthropic_api_key = apiKey;
-    else if (tool === 'gemini') credentials.google_api_key = apiKey;
-    else if (tool === 'cursor') credentials.oauth_token = apiKey;
-  }
-  if (oauthToken) credentials.oauth_token = oauthToken;
   
   try {
     const resp = await fetch(API + `/api/credentials/${tool}`, {
@@ -11368,7 +11437,10 @@ async function submitAddCredential() {
       body: JSON.stringify({account_id: accountId, credentials})
     });
     
-    if (!resp.ok) throw new Error('Failed to save credential');
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'Failed to save credential');
+    }
     
     closeAddCredential();
     loadCredentials();
@@ -11427,6 +11499,185 @@ async function changeStrategy(tool, strategy) {
     loadCredentials();
   } catch(e) {
     alert('Error updating strategy: ' + e.message);
+  }
+}
+
+// Update credential form based on tool selection
+function updateCredentialForm() {
+  const tool = document.getElementById('cred-tool').value;
+  const authTypeSelect = document.getElementById('cred-auth-type');
+  const helpText = document.getElementById('cred-help-text');
+  
+  // Update auth type options
+  authTypeSelect.innerHTML = '';
+  
+  const toolConfigs = {
+    claude_code: {
+      authTypes: [
+        {value: 'api_key', label: 'API Key (Recommended)'},
+        {value: 'session', label: 'Session Token'}
+      ],
+      help: '<strong>Claude Code:</strong> Get API key from <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent);text-decoration:underline;">Anthropic Console</a>. Cost: $3-4/hour with Sonnet 3.5 for parallel agents.'
+    },
+    cursor: {
+      authTypes: [
+        {value: 'oauth', label: 'OAuth Token (Recommended)'},
+        {value: 'session', label: 'Session Token'}
+      ],
+      help: '<strong>Cursor:</strong> OAuth tokens are auto-detected from <code>~/.cursor/cli-config.json</code>. Or get from Cursor IDE → Settings → Account.'
+    },
+    gemini: {
+      authTypes: [
+        {value: 'api_key', label: 'API Key'}
+      ],
+      help: '<strong>Gemini:</strong> Get free API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);text-decoration:underline;">Google AI Studio</a>. Free tier: 60 requests/minute.'
+    },
+    aider: {
+      authTypes: [
+        {value: 'api_key', label: 'OpenAI API Key'},
+        {value: 'anthropic_key', label: 'Anthropic API Key'}
+      ],
+      help: '<strong>Aider:</strong> Supports both OpenAI and Anthropic. Get keys from <a href="https://platform.openai.com/api-keys" target="_blank" style="color:var(--accent);">OpenAI</a> or <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent);">Anthropic</a>.'
+    }
+  };
+  
+  const config = toolConfigs[tool];
+  config.authTypes.forEach(at => {
+    const opt = document.createElement('option');
+    opt.value = at.value;
+    opt.textContent = at.label;
+    authTypeSelect.appendChild(opt);
+  });
+  
+  helpText.innerHTML = config.help;
+  
+  // Update inputs
+  updateCredentialInputs();
+}
+
+// Update visible inputs based on auth type
+function updateCredentialInputs() {
+  const authType = document.getElementById('cred-auth-type').value;
+  const tool = document.getElementById('cred-tool').value;
+  
+  // Hide all
+  document.getElementById('cred-api-key-group').style.display = 'none';
+  document.getElementById('cred-session-group').style.display = 'none';
+  document.getElementById('cred-oauth-group').style.display = 'none';
+  
+  // Show relevant
+  if (authType === 'api_key' || authType === 'anthropic_key') {
+    document.getElementById('cred-api-key-group').style.display = 'block';
+    const input = document.getElementById('cred-api-key');
+    if (tool === 'claude_code') input.placeholder = 'sk-ant-api03-...';
+    else if (tool === 'gemini') input.placeholder = 'AIza...';
+    else if (tool === 'aider') input.placeholder = 'sk-...';
+  } else if (authType === 'session') {
+    document.getElementById('cred-session-group').style.display = 'block';
+  } else if (authType === 'oauth') {
+    document.getElementById('cred-oauth-group').style.display = 'block';
+  }
+}
+
+// Open credentials guide
+function openCredentialsGuide() {
+  const modal = document.createElement('div');
+  modal.className = 'board-edit-overlay active';
+  modal.style.display = 'flex';
+  modal.onclick = (e) => { if (e.target === modal) document.body.removeChild(modal); };
+  
+  modal.innerHTML = `
+    <div class="board-edit-box" style="max-width:700px;max-height:80vh;overflow-y:auto;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <div style="font-weight:600;font-size:0.95rem;">How to Get API Keys</div>
+        <button onclick="this.closest('.board-edit-overlay').remove()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--dim);">×</button>
+      </div>
+      
+      <div style="display:flex;flex-direction:column;gap:16px;font-size:0.8rem;line-height:1.6;">
+        <div style="padding:10px;background:var(--card);border:1px solid var(--border);border-radius:6px;">
+          <div style="font-weight:600;margin-bottom:6px;">🔑 Claude Code / Anthropic</div>
+          <div style="color:var(--dim);">
+            1. Go to <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent);">Anthropic Console</a><br>
+            2. Click "Create Key"<br>
+            3. Copy key (starts with <code style="color:var(--accent);">sk-ant-api03-</code>)<br>
+            4. Paste into AMUX dashboard<br>
+            <strong>Cost:</strong> $3-4/hour with Sonnet 3.5 for parallel agents
+          </div>
+        </div>
+        
+        <div style="padding:10px;background:var(--card);border:1px solid var(--border);border-radius:6px;">
+          <div style="font-weight:600;margin-bottom:6px;">🖱️ Cursor</div>
+          <div style="color:var(--dim);">
+            <strong>Auto-detected from:</strong> <code style="color:var(--accent);">~/.cursor/cli-config.json</code><br>
+            Or manually:<br>
+            1. Open Cursor IDE → Settings → Account<br>
+            2. Copy OAuth token<br>
+            3. Paste into AMUX<br>
+            <strong>Note:</strong> Tokens expire after 90 days
+          </div>
+        </div>
+        
+        <div style="padding:10px;background:var(--card);border:1px solid var(--border);border-radius:6px;">
+          <div style="font-weight:600;margin-bottom:6px;">🌟 Google Gemini</div>
+          <div style="color:var(--dim);">
+            1. Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent);">Google AI Studio</a><br>
+            2. Click "Get API Key"<br>
+            3. Select or create Google Cloud project<br>
+            4. Copy key (starts with <code style="color:var(--accent);">AIza</code>)<br>
+            <strong>Free tier:</strong> 60 requests/minute
+          </div>
+        </div>
+        
+        <div style="padding:10px;background:var(--card);border:1px solid var(--border);border-radius:6px;">
+          <div style="font-weight:600;margin-bottom:6px;">🛠️ Aider</div>
+          <div style="color:var(--dim);">
+            <strong>OpenAI:</strong> <a href="https://platform.openai.com/api-keys" target="_blank" style="color:var(--accent);">platform.openai.com/api-keys</a><br>
+            <strong>Anthropic:</strong> Same as Claude Code above<br>
+            Aider supports both providers - configure in dashboard
+          </div>
+        </div>
+        
+        <div style="padding:10px;background:rgba(63,185,80,0.1);border:1px solid rgba(63,185,80,0.3);border-radius:6px;">
+          <div style="font-weight:600;margin-bottom:6px;">💡 Pro Tips</div>
+          <div style="color:var(--dim);">
+            • Add multiple accounts to enable load balancing<br>
+            • Use Round Robin strategy to distribute requests evenly<br>
+            • Monitor usage in Credentials tab<br>
+            • Keys are encrypted with AES-128 in <code style="color:var(--accent);">~/.amux/credentials/</code>
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-top:14px;text-align:center;">
+        <button class="btn primary" onclick="this.closest('.board-edit-overlay').remove()">Got it!</button>
+      </div>
+    </div>
+  `;
+  
+  document.body.appendChild(modal);
+}
+
+// Auto-detect credentials from config files
+async function autoDetectCredentials() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '🔄 Detecting...';
+  
+  try {
+    const resp = await fetch(API + '/api/credentials/detect', {method: 'POST'});
+    const result = await resp.json();
+    
+    if (result.detected && result.detected.length > 0) {
+      alert(`Found ${result.detected.length} credential(s):\n\n${result.detected.join('\n')}`);
+      loadCredentials();
+    } else {
+      alert('No credentials auto-detected.\n\nPlease add them manually using the "+ Add Account" button.');
+    }
+  } catch(e) {
+    alert('Auto-detection failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '&#x1F50D; Auto-Detect';
   }
 }
 
