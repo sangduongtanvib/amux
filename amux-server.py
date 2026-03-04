@@ -1669,6 +1669,30 @@ CREATE TABLE IF NOT EXISTS org_invites (
     used_at    INTEGER,
     used_by    TEXT
 );
+CREATE TABLE IF NOT EXISTS mcp_configs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    type        TEXT NOT NULL,
+    command     TEXT,
+    args        TEXT,
+    url         TEXT,
+    headers     TEXT,
+    env_vars    TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created     INTEGER NOT NULL,
+    updated     INTEGER NOT NULL,
+    deleted     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_enabled ON mcp_configs(enabled) WHERE deleted IS NULL;
+CREATE TABLE IF NOT EXISTS session_mcp_links (
+    session     TEXT NOT NULL,
+    mcp_id      TEXT NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0,
+    created     INTEGER NOT NULL,
+    PRIMARY KEY (session, mcp_id),
+    FOREIGN KEY (mcp_id) REFERENCES mcp_configs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_mcp_session ON session_mcp_links(session);
 """
 
 
@@ -3006,6 +3030,63 @@ def _capture_claude_memory_changes(name: str, work_dir: str):
         pass
 
 
+def _generate_session_mcp_json(name: str, work_dir: str):
+    """Generate session-specific mcp.json from database configuration."""
+    try:
+        db = get_db()
+        # Get MCP configs for this session
+        rows = db.execute(
+            """SELECT m.id, m.name, m.type, m.command, m.args, m.url, m.headers, m.env_vars
+               FROM session_mcp_links sml
+               JOIN mcp_configs m ON m.id = sml.mcp_id
+               WHERE sml.session = ? AND m.deleted IS NULL AND m.enabled = 1
+               ORDER BY sml.position""",
+            (name,)
+        ).fetchall()
+        
+        if not rows:
+            # No MCP configs for this session — don't create mcp.json
+            return
+        
+        mcp_servers = {}
+        for row in rows:
+            r = dict(row)
+            server_config = {"type": r["type"]}
+            
+            if r["type"] == "stdio":
+                server_config["command"] = r["command"]
+                if r["args"]:
+                    try:
+                        server_config["args"] = json.loads(r["args"])
+                    except Exception:
+                        server_config["args"] = []
+            elif r["type"] == "http":
+                server_config["url"] = r["url"]
+                if r["headers"]:
+                    try:
+                        server_config["headers"] = json.loads(r["headers"])
+                    except Exception:
+                        pass
+            
+            # Add environment variables if specified
+            if r["env_vars"]:
+                try:
+                    server_config["env"] = json.loads(r["env_vars"])
+                except Exception:
+                    pass
+            
+            mcp_servers[r["name"]] = server_config
+        
+        # Write mcp.json to work directory
+        mcp_config = {"mcpServers": mcp_servers}
+        work_path = Path(work_dir)
+        mcp_file = work_path / "mcp.json"
+        mcp_file.write_text(json.dumps(mcp_config, indent=2) + "\n")
+        slog(f"[MCP] Generated mcp.json for session '{name}' with {len(mcp_servers)} servers")
+    except Exception as e:
+        slog(f"[MCP] Failed to generate mcp.json for session '{name}': {e}")
+
+
 def _write_claude_memory(name: str, work_dir: str):
     """Write composed (global + session) memory to Claude's project memory dir."""
     pname = _project_name(work_dir)
@@ -3053,6 +3134,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
     flags = cfg.get("CC_FLAGS", "")
     _ensure_memory(name, work_dir)
+    
+    # Generate session-specific mcp.json
+    _generate_session_mcp_json(name, work_dir)
 
     # Get AI tool type from config (default: claude_code)
     tool_name = cfg.get("CC_TOOL", "claude_code")
@@ -5469,6 +5553,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-reports" onclick="switchView('reports')">Reports</button>
   <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-credentials" onclick="switchView('credentials')">Credentials</button>
+  <button id="tab-mcp" onclick="switchView('mcp')">MCP</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
@@ -5698,6 +5783,66 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div style="font-size:2rem;margin-bottom:12px;">🔔</div>
     <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Notifications</div>
     <div style="color:var(--dim);font-size:0.85rem;">Due date reminders, spend alerts, and agent updates will appear here.</div>
+  </div>
+</div>
+
+<!-- MCP view -->
+<div id="mcp-view" style="display:none;">
+  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">MCP Servers</span>
+    <div style="flex:1;"></div>
+    <button class="btn" onclick="openAddMcp()" style="font-size:0.78rem;padding:4px 10px;">+ Add Server</button>
+  </div>
+  <div style="margin:0 12px 8px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
+    Manage <strong style="color:var(--text);">Model Context Protocol</strong> servers for agent tools and capabilities. Configure once, then assign to specific sessions.
+    <span style="display:block;margin-top:6px;">Supports stdio (command-based) and HTTP servers. Generated mcp.json per session.</span>
+  </div>
+  <div id="mcp-servers-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:12px;"></div>
+  
+  <!-- Add/Edit MCP Modal -->
+  <div id="add-mcp-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeAddMcp()" style="display:none;">
+    <div class="board-edit-box" style="max-width:620px;">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;" id="mcp-modal-title">Add MCP Server</div>
+      <input type="hidden" id="mcp-edit-id">
+      
+      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Name</label>
+      <input type="text" id="mcp-name" placeholder="e.g., claude-in-chrome" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;">
+      
+      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Server Type</label>
+      <select id="mcp-type" onchange="toggleMcpTypeFields()" style="width:calc(100% - 4px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;">
+        <option value="stdio">stdio (command-based)</option>
+        <option value="http">HTTP (URL-based)</option>
+      </select>
+      
+      <div id="mcp-stdio-fields" style="display:block;">
+        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Command</label>
+        <input type="text" id="mcp-command" placeholder="e.g., npx, python3, node" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;">
+        
+        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Arguments (one per line)</label>
+        <textarea id="mcp-args" placeholder="e.g., -y&#10;@anthropic-ai/claude-code-mcp-server-chrome" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:80px;"></textarea>
+      </div>
+      
+      <div id="mcp-http-fields" style="display:none;">
+        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">URL</label>
+        <input type="text" id="mcp-url" placeholder="e.g., https://mcp.mixpeek.com/mcp" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;">
+        
+        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Headers (JSON)</label>
+        <textarea id="mcp-headers" placeholder='{"Authorization": "Bearer ${API_KEY}"}' style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:80px;"></textarea>
+      </div>
+      
+      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Environment Variables (JSON, optional)</label>
+      <textarea id="mcp-env-vars" placeholder='{"API_KEY": "sk_..."}' style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:60px;"></textarea>
+      
+      <label style="display:flex;align-items:center;gap:6px;margin-bottom:16px;font-size:0.8rem;color:var(--dim);cursor:pointer;">
+        <input type="checkbox" id="mcp-enabled" checked style="width:16px;height:16px;">
+        <span>Enabled</span>
+      </label>
+      
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" onclick="closeAddMcp()" style="background:var(--dim);color:var(--bg);padding:6px 16px;">Cancel</button>
+        <button class="btn" onclick="saveMcp()" style="background:var(--accent);color:#000;padding:6px 16px;">Save</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -11973,6 +12118,215 @@ function applyPastedToken() {
   alert('✅ Token pasted! Click "Save" to store the credential.');
 }
 
+// ═══════ MCP MANAGEMENT ═══════
+let _mcpServers = [];
+
+async function loadMcpServers() {
+  try {
+    const resp = await fetch(API + '/api/mcp');
+    _mcpServers = await resp.json();
+    renderMcpServers();
+  } catch(e) {
+    console.error('Failed to load MCP servers:', e);
+  }
+}
+
+function renderMcpServers() {
+  const container = document.getElementById('mcp-servers-list');
+  if (!_mcpServers || _mcpServers.length === 0) {
+    container.innerHTML = '<div class="empty-state" style="padding:48px 16px;text-align:center;"><div style="font-size:2rem;margin-bottom:12px;">🔌</div><div style="font-weight:600;margin-bottom:6px;color:var(--fg);">No MCP Servers</div><div style="color:var(--dim);font-size:0.85rem;">Click "+ Add Server" to configure your first MCP server</div></div>';
+    return;
+  }
+  
+  const html = _mcpServers.map(mcp => {
+    const typeLabel = mcp.type === 'stdio' ? '⚙️ stdio' : '🌐 HTTP';
+    const statusBadge = mcp.enabled ? '<span style="padding:2px 8px;border-radius:4px;background:var(--green);color:#000;font-size:0.7rem;font-weight:600;">Enabled</span>' : '<span style="padding:2px 8px;border-radius:4px;background:var(--dim);color:var(--bg);font-size:0.7rem;">Disabled</span>';
+    
+    let details = '';
+    if (mcp.type === 'stdio') {
+      const args = mcp.args && mcp.args.length > 0 ? mcp.args.join(' ') : '';
+      details = `<code style="font-size:0.72rem;color:var(--dim);">${mcp.command || ''} ${args}</code>`;
+    } else {
+      details = `<code style="font-size:0.72rem;color:var(--dim);">${mcp.url || ''}</code>`;
+    }
+    
+    return `
+      <div style="padding:14px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span style="font-weight:600;font-size:0.9rem;flex:1;">${mcp.name}</span>
+          <span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;background:var(--accent);color:#000;">${typeLabel}</span>
+          ${statusBadge}
+        </div>
+        <div style="margin-bottom:8px;">${details}</div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <button class="btn" onclick="editMcp('${mcp.id}')" style="font-size:0.75rem;padding:4px 10px;">✏️ Edit</button>
+          <button class="btn" onclick="testMcp('${mcp.id}')" style="font-size:0.75rem;padding:4px 10px;">🔍 Test</button>
+          <button class="btn" onclick="deleteMcp('${mcp.id}')" style="font-size:0.75rem;padding:4px 10px;background:var(--red);color:#000;">🗑️ Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  container.innerHTML = html;
+}
+
+function openAddMcp() {
+  document.getElementById('mcp-modal-title').textContent = 'Add MCP Server';
+  document.getElementById('mcp-edit-id').value = '';
+  document.getElementById('mcp-name').value = '';
+  document.getElementById('mcp-type').value = 'stdio';
+  document.getElementById('mcp-command').value = '';
+  document.getElementById('mcp-args').value = '';
+  document.getElementById('mcp-url').value = '';
+  document.getElementById('mcp-headers').value = '';
+  document.getElementById('mcp-env-vars').value = '';
+  document.getElementById('mcp-enabled').checked = true;
+  toggleMcpTypeFields();
+  
+  const overlay = document.getElementById('add-mcp-overlay');
+  overlay.style.display = 'flex';
+  setTimeout(() => overlay.classList.add('active'), 10);
+  document.getElementById('mcp-name').focus();
+}
+
+function editMcp(mcpId) {
+  const mcp = _mcpServers.find(m => m.id === mcpId);
+  if (!mcp) return;
+  
+  document.getElementById('mcp-modal-title').textContent = 'Edit MCP Server';
+  document.getElementById('mcp-edit-id').value = mcp.id;
+  document.getElementById('mcp-name').value = mcp.name;
+  document.getElementById('mcp-type').value = mcp.type;
+  document.getElementById('mcp-command').value = mcp.command || '';
+  document.getElementById('mcp-args').value = (mcp.args || []).join('\n');
+  document.getElementById('mcp-url').value = mcp.url || '';
+  document.getElementById('mcp-headers').value = JSON.stringify(mcp.headers || {}, null, 2);
+  document.getElementById('mcp-env-vars').value = JSON.stringify(mcp.env_vars || {}, null, 2);
+  document.getElementById('mcp-enabled').checked = mcp.enabled;
+  toggleMcpTypeFields();
+  
+  const overlay = document.getElementById('add-mcp-overlay');
+  overlay.style.display = 'flex';
+  setTimeout(() => overlay.classList.add('active'), 10);
+  document.getElementById('mcp-name').focus();
+}
+
+function closeAddMcp() {
+  const overlay = document.getElementById('add-mcp-overlay');
+  overlay.classList.remove('active');
+  setTimeout(() => overlay.style.display = 'none', 250);
+}
+
+function toggleMcpTypeFields() {
+  const type = document.getElementById('mcp-type').value;
+  document.getElementById('mcp-stdio-fields').style.display = type === 'stdio' ? 'block' : 'none';
+  document.getElementById('mcp-http-fields').style.display = type === 'http' ? 'block' : 'none';
+}
+
+async function saveMcp() {
+  const editId = document.getElementById('mcp-edit-id').value;
+  const name = document.getElementById('mcp-name').value.trim();
+  const type = document.getElementById('mcp-type').value;
+  const enabled = document.getElementById('mcp-enabled').checked;
+  
+  if (!name) {
+    alert('⚠️ Please provide a name');
+    return;
+  }
+  
+  const payload = { name, type, enabled };
+  
+  if (type === 'stdio') {
+    const command = document.getElementById('mcp-command').value.trim();
+    const argsText = document.getElementById('mcp-args').value.trim();
+    if (!command) {
+      alert('⚠️ Please provide a command');
+      return;
+    }
+    payload.command = command;
+    payload.args = argsText ? argsText.split('\n').map(s => s.trim()).filter(Boolean) : [];
+  } else if (type === 'http') {
+    const url = document.getElementById('mcp-url').value.trim();
+    if (!url) {
+      alert('⚠️ Please provide a URL');
+      return;
+    }
+    payload.url = url;
+    const headersText = document.getElementById('mcp-headers').value.trim();
+    if (headersText) {
+      try {
+        payload.headers = JSON.parse(headersText);
+      } catch(e) {
+        alert('⚠️ Invalid JSON for headers');
+        return;
+      }
+    }
+  }
+  
+  const envVarsText = document.getElementById('mcp-env-vars').value.trim();
+  if (envVarsText) {
+    try {
+      payload.env_vars = JSON.parse(envVarsText);
+    } catch(e) {
+      alert('⚠️ Invalid JSON for environment variables');
+      return;
+    }
+  }
+  
+  try {
+    let url, method;
+    if (editId) {
+      url = API + `/api/mcp/${editId}`;
+      method = 'PATCH';
+    } else {
+      url = API + '/api/mcp';
+      method = 'POST';
+    }
+    
+    const resp = await fetch(url, {
+      method,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'Failed to save MCP config');
+    }
+    
+    closeAddMcp();
+    loadMcpServers();
+  } catch(e) {
+    alert('❌ Error saving MCP: ' + e.message);
+  }
+}
+
+async function deleteMcp(mcpId) {
+  const mcp = _mcpServers.find(m => m.id === mcpId);
+  if (!mcp || !confirm(`Delete MCP server "${mcp.name}"?`)) return;
+  
+  try {
+    await fetch(API + `/api/mcp/${mcpId}`, {method: 'DELETE'});
+    loadMcpServers();
+  } catch(e) {
+    alert('❌ Error deleting MCP: ' + e.message);
+  }
+}
+
+async function testMcp(mcpId) {
+  try {
+    const resp = await fetch(API + `/api/mcp/${mcpId}/test`, {method: 'POST'});
+    const result = await resp.json();
+    if (result.ok) {
+      alert('✅ MCP config validation passed!\n\n' + (result.message || 'Ready to use'));
+    } else {
+      alert('❌ MCP validation failed:\n\n' + (result.error || 'Unknown error'));
+    }
+  } catch(e) {
+    alert('❌ Test failed: ' + e.message);
+  }
+}
+
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
@@ -12044,6 +12398,7 @@ function switchView(view) {
   document.getElementById('reports-view').style.display = view === 'reports' ? '' : 'none';
   document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
   document.getElementById('credentials-view').style.display = view === 'credentials' ? '' : 'none';
+  document.getElementById('mcp-view').style.display = view === 'mcp' ? '' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
@@ -12054,6 +12409,7 @@ function switchView(view) {
   document.getElementById('tab-reports').classList.toggle('active', view === 'reports');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
   document.getElementById('tab-credentials').classList.toggle('active', view === 'credentials');
+  document.getElementById('tab-mcp').classList.toggle('active', view === 'mcp');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
   document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
@@ -12063,6 +12419,7 @@ function switchView(view) {
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
   if (view === 'credentials') loadCredentials();
+  if (view === 'mcp') loadMcpServers();
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
@@ -16848,6 +17205,198 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
 
 
+        # ── MCP API ───────────────────────────────────────────────────────────
+        if path == "/api/mcp" or path.startswith("/api/mcp/"):
+            db = get_db()
+
+            # GET /api/mcp — list all MCP configs
+            if method == "GET" and path == "/api/mcp":
+                rows = db.execute(
+                    """SELECT id, name, type, command, args, url, headers, env_vars, enabled, created, updated
+                       FROM mcp_configs WHERE deleted IS NULL ORDER BY name"""
+                ).fetchall()
+                configs = []
+                for row in rows:
+                    r = dict(row)
+                    # Parse JSON fields
+                    if r["args"]:
+                        try:
+                            r["args"] = json.loads(r["args"])
+                        except Exception:
+                            r["args"] = []
+                    else:
+                        r["args"] = []
+                    if r["headers"]:
+                        try:
+                            r["headers"] = json.loads(r["headers"])
+                        except Exception:
+                            r["headers"] = {}
+                    else:
+                        r["headers"] = {}
+                    if r["env_vars"]:
+                        try:
+                            r["env_vars"] = json.loads(r["env_vars"])
+                        except Exception:
+                            r["env_vars"] = {}
+                    else:
+                        r["env_vars"] = {}
+                    configs.append(r)
+                return self._json(configs)
+
+            # POST /api/mcp — create new MCP config
+            if method == "POST" and path == "/api/mcp":
+                body = self._read_body()
+                name = body.get("name", "").strip()
+                mcp_type = body.get("type", "").strip()
+                
+                if not name:
+                    return self._json({"error": "missing name"}, 400)
+                if mcp_type not in ("stdio", "http"):
+                    return self._json({"error": "type must be stdio or http"}, 400)
+                
+                # Generate ID from name
+                mcp_id = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50]
+                
+                # Check if name already exists
+                exists = db.execute("SELECT id FROM mcp_configs WHERE name = ? AND deleted IS NULL", (name,)).fetchone()
+                if exists:
+                    return self._json({"error": "name already exists"}, 409)
+                
+                now = int(time.time())
+                command = body.get("command", "").strip() if mcp_type == "stdio" else None
+                url = body.get("url", "").strip() if mcp_type == "http" else None
+                args = json.dumps(body.get("args", [])) if mcp_type == "stdio" else None
+                headers = json.dumps(body.get("headers", {})) if mcp_type == "http" else None
+                env_vars = json.dumps(body.get("env_vars", {}))
+                enabled = 1 if body.get("enabled", True) else 0
+                
+                # Validate required fields
+                if mcp_type == "stdio" and not command:
+                    return self._json({"error": "stdio type requires command"}, 400)
+                if mcp_type == "http" and not url:
+                    return self._json({"error": "http type requires url"}, 400)
+                
+                db.execute(
+                    """INSERT INTO mcp_configs (id, name, type, command, args, url, headers, env_vars, enabled, created, updated)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (mcp_id, name, mcp_type, command, args, url, headers, env_vars, enabled, now, now),
+                )
+                db.commit()
+                
+                # Return created config
+                row = db.execute("SELECT * FROM mcp_configs WHERE id = ?", (mcp_id,)).fetchone()
+                config = dict(row)
+                config["args"] = json.loads(config["args"]) if config["args"] else []
+                config["headers"] = json.loads(config["headers"]) if config["headers"] else {}
+                config["env_vars"] = json.loads(config["env_vars"]) if config["env_vars"] else {}
+                return self._json(config, 201)
+
+            # PATCH /api/mcp/<id> — update MCP config
+            mcp_match = re.match(r"^/api/mcp/([a-z0-9-]+)$", path)
+            if mcp_match and method == "PATCH":
+                mcp_id = mcp_match.group(1)
+                exists = db.execute("SELECT id FROM mcp_configs WHERE id = ? AND deleted IS NULL", (mcp_id,)).fetchone()
+                if not exists:
+                    return self._json({"error": "not found"}, 404)
+                
+                body = self._read_body()
+                now = int(time.time())
+                updates = []
+                values = []
+                
+                if "name" in body:
+                    name = body["name"].strip()
+                    if not name:
+                        return self._json({"error": "name cannot be empty"}, 400)
+                    # Check if new name conflicts
+                    conflict = db.execute(
+                        "SELECT id FROM mcp_configs WHERE name = ? AND id != ? AND deleted IS NULL",
+                        (name, mcp_id)
+                    ).fetchone()
+                    if conflict:
+                        return self._json({"error": "name already exists"}, 409)
+                    updates.append("name = ?")
+                    values.append(name)
+                
+                if "type" in body:
+                    mcp_type = body["type"].strip()
+                    if mcp_type not in ("stdio", "http"):
+                        return self._json({"error": "type must be stdio or http"}, 400)
+                    updates.append("type = ?")
+                    values.append(mcp_type)
+                
+                if "command" in body:
+                    updates.append("command = ?")
+                    values.append(body["command"].strip() or None)
+                
+                if "args" in body:
+                    updates.append("args = ?")
+                    values.append(json.dumps(body["args"]))
+                
+                if "url" in body:
+                    updates.append("url = ?")
+                    values.append(body["url"].strip() or None)
+                
+                if "headers" in body:
+                    updates.append("headers = ?")
+                    values.append(json.dumps(body["headers"]))
+                
+                if "env_vars" in body:
+                    updates.append("env_vars = ?")
+                    values.append(json.dumps(body["env_vars"]))
+                
+                if "enabled" in body:
+                    updates.append("enabled = ?")
+                    values.append(1 if body["enabled"] else 0)
+                
+                if updates:
+                    updates.append("updated = ?")
+                    values.append(now)
+                    values.append(mcp_id)
+                    db.execute(
+                        f"UPDATE mcp_configs SET {', '.join(updates)} WHERE id = ?",
+                        values
+                    )
+                    db.commit()
+                
+                return self._json({"ok": True})
+
+            # DELETE /api/mcp/<id> — soft delete MCP config
+            if mcp_match and method == "DELETE":
+                mcp_id = mcp_match.group(1)
+                now = int(time.time())
+                db.execute("UPDATE mcp_configs SET deleted = ? WHERE id = ?", (now, mcp_id))
+                db.execute("DELETE FROM session_mcp_links WHERE mcp_id = ?", (mcp_id,))
+                db.commit()
+                return self._json({"ok": True})
+
+            # POST /api/mcp/<id>/test — test MCP connection
+            test_match = re.match(r"^/api/mcp/([a-z0-9-]+)/test$", path)
+            if test_match and method == "POST":
+                mcp_id = test_match.group(1)
+                row = db.execute(
+                    """SELECT id, name, type, command, args, url, headers, env_vars
+                       FROM mcp_configs WHERE id = ? AND deleted IS NULL""",
+                    (mcp_id,)
+                ).fetchone()
+                if not row:
+                    return self._json({"error": "not found"}, 404)
+                
+                config = dict(row)
+                # For now, just validate the config structure
+                # TODO: Add actual MCP connection testing
+                if config["type"] == "stdio":
+                    if not config["command"]:
+                        return self._json({"ok": False, "error": "missing command"})
+                elif config["type"] == "http":
+                    if not config["url"]:
+                        return self._json({"ok": False, "error": "missing url"})
+                
+                return self._json({"ok": True, "message": "config validation passed"})
+
+            return self._json({"error": "not found"}, 404)
+
+
         # ── Schedules API ─────────────────────────────────────────────────────
         if path == "/api/schedules" or path.startswith("/api/schedules/"):
             import time as _time
@@ -17592,6 +18141,44 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _ensure_memory(name, wd)
                 content = mem_file.read_text(errors="replace") if mem_file.exists() else ""
                 return self._json({"content": content, "path": str(mem_file)})
+            if action == "mcp":
+                # GET /api/sessions/<name>/mcp — list MCP servers for this session
+                db = get_db()
+                rows = db.execute(
+                    """SELECT m.id, m.name, m.type, m.command, m.args, m.url, m.headers, m.env_vars, m.enabled, sml.position
+                       FROM session_mcp_links sml
+                       JOIN mcp_configs m ON m.id = sml.mcp_id
+                       WHERE sml.session = ? AND m.deleted IS NULL
+                       ORDER BY sml.position""",
+                    (name,)
+                ).fetchall()
+                configs = []
+                for row in rows:
+                    r = dict(row)
+                    # Parse JSON fields
+                    if r["args"]:
+                        try:
+                            r["args"] = json.loads(r["args"])
+                        except Exception:
+                            r["args"] = []
+                    else:
+                        r["args"] = []
+                    if r["headers"]:
+                        try:
+                            r["headers"] = json.loads(r["headers"])
+                        except Exception:
+                            r["headers"] = {}
+                    else:
+                        r["headers"] = {}
+                    if r["env_vars"]:
+                        try:
+                            r["env_vars"] = json.loads(r["env_vars"])
+                        except Exception:
+                            r["env_vars"] = {}
+                    else:
+                        r["env_vars"] = {}
+                    configs.append(r)
+                return self._json(configs)
             return self._json({"error": "not found"}, 404)
 
         if method == "POST":
@@ -17654,6 +18241,34 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "stop":
                 ok, msg = stop_session(name)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+            if action == "mcp":
+                # POST /api/sessions/<name>/mcp — set MCP servers for this session
+                body = self._read_body()
+                mcp_ids = body.get("mcp_ids", [])
+                if not isinstance(mcp_ids, list):
+                    return self._json({"error": "mcp_ids must be an array"}, 400)
+                
+                db = get_db()
+                # Remove existing links
+                db.execute("DELETE FROM session_mcp_links WHERE session = ?", (name,))
+                
+                # Add new links
+                now = int(time.time())
+                for idx, mcp_id in enumerate(mcp_ids):
+                    # Validate MCP exists
+                    exists = db.execute(
+                        "SELECT id FROM mcp_configs WHERE id = ? AND deleted IS NULL",
+                        (mcp_id,)
+                    ).fetchone()
+                    if not exists:
+                        db.rollback()
+                        return self._json({"error": f"MCP config '{mcp_id}' not found"}, 404)
+                    db.execute(
+                        "INSERT INTO session_mcp_links (session, mcp_id, position, created) VALUES (?, ?, ?, ?)",
+                        (name, mcp_id, idx, now)
+                    )
+                db.commit()
+                return self._json({"ok": True, "count": len(mcp_ids)})
             if action == "clear":
                 try:
                     subprocess.run(
