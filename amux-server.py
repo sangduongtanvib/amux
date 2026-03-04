@@ -5791,6 +5791,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     <span style="font-weight:600;font-size:0.85rem;color:var(--text);">MCP Servers</span>
     <div style="flex:1;"></div>
+    <button class="btn" onclick="exportMcpJson()" style="font-size:0.78rem;padding:4px 10px;">📥 Export JSON</button>
+    <button class="btn" onclick="openImportMcpJson()" style="font-size:0.78rem;padding:4px 10px;background:var(--green);color:#000;">📤 Import JSON</button>
     <button class="btn" onclick="openAddMcp()" style="font-size:0.78rem;padding:4px 10px;">+ Add Server</button>
   </div>
   <div style="margin:0 12px 8px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
@@ -5841,6 +5843,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div style="display:flex;gap:8px;justify-content:flex-end;">
         <button class="btn" onclick="closeAddMcp()" style="background:var(--dim);color:var(--bg);padding:6px 16px;">Cancel</button>
         <button class="btn" onclick="saveMcp()" style="background:var(--accent);color:#000;padding:6px 16px;">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import MCP JSON Modal -->
+  <div id="import-mcp-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeImportMcp()" style="display:none;">
+    <div class="board-edit-box" style="max-width:720px;">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;">Import MCP Servers from JSON</div>
+      
+      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Paste mcp.json content below:</label>
+      <textarea id="import-mcp-json" placeholder='{"mcpServers": {"server-name": {...}, ...}}' style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:280px;"></textarea>
+      
+      <label style="display:flex;align-items:center;gap:6px;margin-bottom:16px;font-size:0.8rem;color:var(--dim);cursor:pointer;">
+        <input type="checkbox" id="import-mcp-overwrite" style="width:16px;height:16px;">
+        <span>Overwrite existing servers with same name</span>
+      </label>
+      
+      <div id="import-mcp-result" style="display:none;padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);font-size:0.8rem;font-family:monospace;white-space:pre-wrap;"></div>
+      
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" onclick="closeImportMcp()" style="background:var(--dim);color:var(--bg);padding:6px 16px;">Cancel</button>
+        <button class="btn" onclick="importMcpJson()" style="background:var(--accent);color:#000;padding:6px 16px;">Import</button>
       </div>
     </div>
   </div>
@@ -12327,6 +12351,113 @@ async function testMcp(mcpId) {
   }
 }
 
+async function exportMcpJson() {
+  try {
+    const resp = await fetch(API + '/api/mcp/export');
+    if (!resp.ok) throw new Error('Export failed');
+    const data = await resp.json();
+    const json = JSON.stringify(data, null, 2);
+    
+    // Create download link
+    const blob = new Blob([json], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mcp.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    
+    // Also copy to clipboard
+    await navigator.clipboard.writeText(json);
+    alert('✅ MCP configuration exported!\n\nFile downloaded as mcp.json\nAlso copied to clipboard');
+  } catch(e) {
+    alert('❌ Export failed: ' + e.message);
+  }
+}
+
+function openImportMcpJson() {
+  document.getElementById('import-mcp-json').value = '';
+  document.getElementById('import-mcp-overwrite').checked = false;
+  document.getElementById('import-mcp-result').style.display = 'none';
+  document.getElementById('import-mcp-result').textContent = '';
+  
+  const overlay = document.getElementById('import-mcp-overlay');
+  overlay.style.display = 'flex';
+  setTimeout(() => overlay.classList.add('active'), 10);
+  document.getElementById('import-mcp-json').focus();
+}
+
+function closeImportMcp() {
+  const overlay = document.getElementById('import-mcp-overlay');
+  overlay.classList.remove('active');
+  setTimeout(() => overlay.style.display = 'none', 250);
+}
+
+async function importMcpJson() {
+  const jsonText = document.getElementById('import-mcp-json').value.trim();
+  const overwrite = document.getElementById('import-mcp-overwrite').checked;
+  const resultDiv = document.getElementById('import-mcp-result');
+  
+  if (!jsonText) {
+    alert('⚠️ Please paste JSON content');
+    return;
+  }
+  
+  // Validate JSON
+  let jsonData;
+  try {
+    jsonData = JSON.parse(jsonText);
+  } catch(e) {
+    alert('❌ Invalid JSON: ' + e.message);
+    return;
+  }
+  
+  try {
+    const resp = await fetch(API + '/api/mcp/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({json: jsonData, overwrite})
+    });
+    
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || 'Import failed');
+    }
+    
+    const result = await resp.json();
+    
+    // Show result
+    let resultText = `✅ Import complete:\n\n`;
+    resultText += `Imported: ${result.imported}\n`;
+    resultText += `Skipped: ${result.skipped}\n`;
+    if (result.errors && result.errors.length > 0) {
+      resultText += `\nErrors:\n`;
+      result.errors.forEach(err => {
+        resultText += `  • ${err}\n`;
+      });
+    }
+    
+    resultDiv.textContent = resultText;
+    resultDiv.style.display = 'block';
+    resultDiv.style.borderColor = 'var(--accent)';
+    resultDiv.style.color = 'var(--text)';
+    
+    // Reload MCP servers list
+    loadMcpServers();
+    
+    // Clear textarea after successful import
+    if (result.imported > 0) {
+      document.getElementById('import-mcp-json').value = '';
+    }
+  } catch(e) {
+    const resultDiv = document.getElementById('import-mcp-result');
+    resultDiv.textContent = '❌ Error: ' + e.message;
+    resultDiv.style.display = 'block';
+    resultDiv.style.borderColor = '#f44';
+    resultDiv.style.color = '#f44';
+  }
+}
+
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
@@ -17393,6 +17524,152 @@ class CCHandler(BaseHTTPRequestHandler):
                         return self._json({"ok": False, "error": "missing url"})
                 
                 return self._json({"ok": True, "message": "config validation passed"})
+
+            # POST /api/mcp/import — import MCP servers from JSON
+            if method == "POST" and path == "/api/mcp/import":
+                body = self._read_body()
+                mcp_json = body.get("json", "")
+                overwrite = body.get("overwrite", False)
+                
+                if not mcp_json:
+                    return self._json({"error": "missing json field"}, 400)
+                
+                try:
+                    # Parse JSON
+                    mcp_data = json.loads(mcp_json) if isinstance(mcp_json, str) else mcp_json
+                    
+                    # Support both raw mcpServers object and {mcpServers: {...}} wrapper
+                    if "mcpServers" in mcp_data:
+                        mcp_servers = mcp_data["mcpServers"]
+                    else:
+                        mcp_servers = mcp_data
+                    
+                    if not isinstance(mcp_servers, dict):
+                        return self._json({"error": "Invalid format: expected object with server definitions"}, 400)
+                    
+                    imported = 0
+                    skipped = 0
+                    errors = []
+                    now = int(time.time())
+                    
+                    for server_name, server_config in mcp_servers.items():
+                        try:
+                            # Validate server config
+                            server_type = server_config.get("type", "stdio")
+                            if server_type not in ("stdio", "http"):
+                                errors.append(f"{server_name}: Invalid type '{server_type}'")
+                                continue
+                            
+                            # Generate ID
+                            mcp_id = re.sub(r"[^a-z0-9]+", "-", server_name.lower()).strip("-")[:50]
+                            
+                            # Check if exists
+                            exists = db.execute(
+                                "SELECT id FROM mcp_configs WHERE name = ? AND deleted IS NULL",
+                                (server_name,)
+                            ).fetchone()
+                            
+                            if exists and not overwrite:
+                                skipped += 1
+                                continue
+                            
+                            # Prepare fields
+                            enabled = 1 if server_config.get("enabled", True) else 0
+                            command = None
+                            args = None
+                            url = None
+                            headers = None
+                            
+                            if server_type == "stdio":
+                                command = server_config.get("command", "")
+                                if not command:
+                                    errors.append(f"{server_name}: Missing command for stdio type")
+                                    continue
+                                args = json.dumps(server_config.get("args", []))
+                            else:  # http
+                                url = server_config.get("url", "")
+                                if not url:
+                                    errors.append(f"{server_name}: Missing url for http type")
+                                    continue
+                                headers = json.dumps(server_config.get("headers", {}))
+                            
+                            env_vars = json.dumps(server_config.get("env", {}))
+                            
+                            if exists and overwrite:
+                                # Update existing
+                                db.execute(
+                                    """UPDATE mcp_configs 
+                                       SET type=?, command=?, args=?, url=?, headers=?, env_vars=?, enabled=?, updated=?
+                                       WHERE name=? AND deleted IS NULL""",
+                                    (server_type, command, args, url, headers, env_vars, enabled, now, server_name)
+                                )
+                            else:
+                                # Insert new
+                                db.execute(
+                                    """INSERT INTO mcp_configs (id, name, type, command, args, url, headers, env_vars, enabled, created, updated)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    (mcp_id, server_name, server_type, command, args, url, headers, env_vars, enabled, now, now)
+                                )
+                            
+                            imported += 1
+                        except Exception as e:
+                            errors.append(f"{server_name}: {str(e)}")
+                    
+                    db.commit()
+                    
+                    return self._json({
+                        "ok": True,
+                        "imported": imported,
+                        "skipped": skipped,
+                        "errors": errors
+                    })
+                    
+                except json.JSONDecodeError as e:
+                    return self._json({"error": f"Invalid JSON: {str(e)}"}, 400)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/mcp/export — export all MCP servers as JSON
+            if method == "GET" and path == "/api/mcp/export":
+                rows = db.execute(
+                    """SELECT id, name, type, command, args, url, headers, env_vars, enabled
+                       FROM mcp_configs WHERE deleted IS NULL ORDER BY name"""
+                ).fetchall()
+                
+                mcp_servers = {}
+                for row in rows:
+                    r = dict(row)
+                    server_config = {"type": r["type"]}
+                    
+                    if r["type"] == "stdio":
+                        server_config["command"] = r["command"]
+                        if r["args"]:
+                            try:
+                                server_config["args"] = json.loads(r["args"])
+                            except:
+                                server_config["args"] = []
+                    elif r["type"] == "http":
+                        server_config["url"] = r["url"]
+                        if r["headers"]:
+                            try:
+                                server_config["headers"] = json.loads(r["headers"])
+                            except:
+                                server_config["headers"] = {}
+                    
+                    if r["env_vars"]:
+                        try:
+                            env_vars = json.loads(r["env_vars"])
+                            if env_vars:
+                                server_config["env"] = env_vars
+                        except:
+                            pass
+                    
+                    if not r["enabled"]:
+                        server_config["enabled"] = False
+                    
+                    mcp_servers[r["name"]] = server_config
+                
+                return self._json({"mcpServers": mcp_servers})
 
             return self._json({"error": "not found"}, 404)
 
