@@ -1,5 +1,13 @@
 {
   "mcpServers": {
+    "amux-orchestrator": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "amux-mcp-server.py"
+      ],
+      "description": "AMUX orchestration - control and monitor AI coding sessions"
+    },
     "claude-in-chrome": {
       "type": "stdio",
       "command": "npx",
