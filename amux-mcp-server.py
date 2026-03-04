@@ -617,21 +617,32 @@ def main():
                 continue
             
             try:
-                request = json.loads(line)
-                request_id = request.get("id")
+                message = json.loads(line)
+                message_id = message.get("id")
+                method = message.get("method", "")
                 
+                # Distinguish between requests (with id) and notifications (without id)
+                if message_id is None:
+                    # This is a notification - no response needed
+                    debug_log(f"Received notification: {method}")
+                    if method == "notifications/initialized":
+                        debug_log("Client initialized successfully")
+                    # Silently ignore other notifications
+                    continue
+                
+                # This is a request - must send response
                 try:
-                    result = handle_request(request)
+                    result = handle_request(message)
                     response = {
                         "jsonrpc": "2.0",
-                        "id": request_id,
+                        "id": message_id,
                         "result": result
                     }
                 except Exception as e:
                     debug_log(f"Error handling request: {str(e)}")
                     response = {
                         "jsonrpc": "2.0",
-                        "id": request_id,
+                        "id": message_id,
                         "error": {
                             "code": -32603,
                             "message": str(e)
