@@ -611,12 +611,18 @@ def main():
     
     try:
         # Read requests from stdin line by line
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            
+        # Note: for line in sys.stdin will block until data arrives or stdin closes
+        while True:
             try:
+                line = sys.stdin.readline()
+                if not line:  # EOF reached, stdin closed
+                    debug_log("stdin closed, server exiting")
+                    break
+                
+                line = line.strip()
+                if not line:
+                    continue
+            
                 message = json.loads(line)
                 message_id = message.get("id")
                 method = message.get("method", "")
@@ -661,8 +667,6 @@ def main():
                 import traceback
                 debug_log(traceback.format_exc())
                 continue
-        
-        debug_log("stdin closed, server exiting")
                 
     except KeyboardInterrupt:
         debug_log("Server stopped by user")
