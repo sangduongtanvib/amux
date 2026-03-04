@@ -15625,7 +15625,7 @@ class CCHandler(BaseHTTPRequestHandler):
 <meta name="viewport" content="width=device-width">
 <style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;font-size:1rem;}</style>
 </head><body>
-<div>Clearing cache\u2026</div>
+<div>Clearing cache&#8230;</div>
 <script>
 (async () => {
   if ('serviceWorker' in navigator) {
