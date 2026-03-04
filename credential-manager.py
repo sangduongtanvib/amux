@@ -184,12 +184,13 @@ class CredentialManager:
         for account_id, account_data in tool_creds["accounts"].items():
             metadata = account_data.get("metadata", {})
             accounts.append({
-                "id": account_id,
+                "account_id": account_id,  # Changed from "id" to "account_id"
                 "name": metadata.get("name", account_id),
                 "enabled": metadata.get("enabled", True),
                 "usage_count": metadata.get("usage_count", 0),
                 "last_used": metadata.get("last_used"),
                 "created": metadata.get("created"),
+                "metadata": metadata,  # Add full metadata for JS access
                 "has_credentials": len(account_data.get("credentials", {})) > 0
             })
         

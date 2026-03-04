@@ -11252,7 +11252,6 @@ async function renderCredentials() {
   let html = '';
   for (const tool of tools) {
     const toolData = credentialsData[tool];
-    const accounts = toolData.accounts || [];
     const lb = toolData.load_balancing || {enabled: false, strategy: 'round_robin'};
     
     const toolNames = {
@@ -11261,6 +11260,11 @@ async function renderCredentials() {
       gemini: 'Gemini',
       aider: 'Aider'
     };
+    
+    // Fetch account details once per tool
+    const accountResp = await fetch(API + `/api/credentials/${tool}`);
+    const accountsData = await accountResp.json();
+    const accounts = accountsData.accounts || [];
     
     html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;">`;
     html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">`;
@@ -11284,24 +11288,18 @@ async function renderCredentials() {
     html += `</div>`;
     
     // Accounts list
-    for (const accountId of accounts) {
-      const accountResp = await fetch(API + `/api/credentials/${tool}`);
-      const accountsData = await accountResp.json();
-      const account = accountsData.accounts.find(a => a.account_id === accountId);
-      
-      if (!account) continue;
-      
-      const usageCount = account.usage_count || 0;
-      const lastUsed = account.last_used ? _fmtRelTime(account.last_used) : 'never';
-      const enabled = account.enabled !== false;
+    for (const account of accounts) {
+      const usageCount = account.metadata?.usage_count || 0;
+      const lastUsed = account.metadata?.last_used ? _fmtRelTime(account.metadata.last_used) : 'never';
+      const enabled = account.metadata?.enabled !== false;
       
       html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-bottom:4px;${!enabled ? 'opacity:0.5;' : ''}">`;
       html += `<div style="flex:1;min-width:0;">`;
-      html += `<div style="font-size:0.78rem;font-weight:500;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;">${accountId}</div>`;
+      html += `<div style="font-size:0.78rem;font-weight:500;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;">${account.account_id}</div>`;
       html += `<div style="font-size:0.68rem;color:var(--dim);">Used ${usageCount}x • ${lastUsed}</div>`;
       html += `</div>`;
-      html += `<button oc="toggleAccountEnabled('${tool}', '${accountId}', ${!enabled})" style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;">${enabled ? '✓' : '○'}</button>`;
-      html += `<button onclick="deleteCredentialAccount('${tool}', '${accountId}')" style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--red);cursor:pointer;">Delete</button>`;
+      html += `<button onclick="toggleAccountEnabled('${tool}', '${account.account_id}', ${!enabled})" style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;">${enabled ? '✓' : '○'}</button>`;
+      html += `<button onclick="deleteCredentialAccount('${tool}', '${account.account_id}')" style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--red);cursor:pointer;">Delete</button>`;
       html += `</div>`;
     }
     
