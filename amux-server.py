@@ -5633,6 +5633,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       
       <div class="field-group" id="cred-oauth-group" style="display:none;">
         <label class="field-label">OAuth Token</label>
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <button type="button" class="btn" onclick="openBrowserLogin()" style="font-size:0.75rem;padding:6px 10px;flex:1;">
+            🌐 Login via Browser
+          </button>
+          <button type="button" class="btn" onclick="pasteFromConfig()" style="font-size:0.75rem;padding:6px 10px;flex:1;">
+            📋 Paste from Config
+          </button>
+        </div>
         <textarea id="cred-oauth-token" placeholder='{"access_token": "..."}' rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
         <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">OAuth token from config file or authorization flow</div>
       </div>
@@ -11801,6 +11809,161 @@ async function importDetectedCredentials(allCredentials) {
   }
 }
 
+// Open browser-based OAuth login helper
+function openBrowserLogin() {
+  const tool = document.getElementById('cred-tool').value;
+  
+  if (tool === 'cursor') {
+    // Show Cursor OAuth helper
+    const modal = document.createElement('div');
+    modal.className = 'board-edit-overlay';
+    modal.style.zIndex = '2500';
+    
+    modal.innerHTML = `
+    <div class="board-edit-modal" style="max-width:600px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <h3 style="margin:0;font-size:1.1rem;">🌐 Cursor OAuth Login</h3>
+        <button onclick="this.closest('.board-edit-overlay').remove()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--dim);">×</button>
+      </div>
+      
+      <div style="padding:14px;background:rgba(88,166,255,0.08);border-radius:10px;margin-bottom:16px;">
+        <div style="font-size:0.85rem;margin-bottom:10px;">✨ <strong>Browser-based login</strong> works like Cursor CLI:</div>
+        <ol style="font-size:0.8rem;color:var(--dim);margin:8px 0 8px 20px;padding:0;line-height:1.6;">
+          <li>Click <strong>"Open Cursor Login"</strong> below</li>
+          <li>Login with your Cursor account</li>
+          <li>After login, check <code style="font-size:0.75rem;">~/.cursor/cli-config.json</code></li>
+          <li>Copy the <strong>token</strong> field value</li>
+          <li>Paste into the OAuth Token field</li>
+        </ol>
+      </div>
+      
+      <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <button class="btn primary" onclick="window.open('https://cursor.com/settings', '_blank')" style="flex:1;">
+          🌐 Open Cursor Login
+        </button>
+        <button class="btn" onclick="showConfigHelp()" style="flex:1;">
+          📝 Show Config Path
+        </button>
+      </div>
+      
+      <div style="padding:12px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;">
+        <div style="font-size:0.75rem;color:var(--dim);margin-bottom:6px;">💡 <strong>Quick method:</strong></div>
+        <code style="font-size:0.7rem;display:block;padding:8px;background:rgba(0,0,0,0.3);border-radius:4px;overflow-x:auto;">
+cat ~/.cursor/cli-config.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4
+        </code>
+        <div style="font-size:0.68rem;color:var(--dim);margin-top:6px;">Run this in terminal to extract token directly</div>
+      </div>
+      
+      <div style="padding:10px;background:rgba(255,193,7,0.1);border-left:3px solid #ffc107;border-radius:4px;font-size:0.75rem;color:var(--dim);">
+        ⚠️ <strong>Note:</strong> Full OAuth callback flow (like Cursor CLI's deep control link) coming soon!
+      </div>
+      
+      <div style="margin-top:16px;text-align:center;">
+        <button class="btn" onclick="this.closest('.board-edit-overlay').remove()">Close</button>
+      </div>
+    </div>
+    `;
+    
+    document.body.appendChild(modal);
+  } else {
+    alert('Browser-based OAuth login is currently only supported for Cursor.\n\nFor other tools, please use API keys or session tokens.');
+  }
+}
+
+// Show config file help
+function showConfigHelp() {
+  const modal = document.createElement('div');
+  modal.className = 'board-edit-overlay';
+  modal.style.zIndex = '2600';
+  
+  modal.innerHTML = `
+  <div class="board-edit-modal" style="max-width:550px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:1.05rem;">📁 Cursor Config File</h3>
+      <button onclick="this.closest('.board-edit-overlay').remove()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--dim);">×</button>
+    </div>
+    
+    <div style="padding:12px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:14px;">
+      <div style="font-size:0.78rem;font-weight:600;margin-bottom:8px;">Config file location:</div>
+      <code style="font-size:0.75rem;display:block;padding:10px;background:rgba(0,0,0,0.3);border-radius:6px;word-break:break-all;">
+~/.cursor/cli-config.json
+      </code>
+    </div>
+    
+    <div style="padding:12px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:14px;">
+      <div style="font-size:0.78rem;font-weight:600;margin-bottom:8px;">File structure:</div>
+      <pre style="font-size:0.7rem;padding:10px;background:rgba(0,0,0,0.3);border-radius:6px;overflow-x:auto;margin:0;line-height:1.5;">{
+  "token": "ey...",
+  "refreshToken": "...",
+  "email": "your@email.com",
+  "createdAt": "..."
+}</pre>
+    </div>
+    
+    <div style="padding:10px;background:rgba(76,175,80,0.1);border-left:3px solid #4caf50;border-radius:4px;font-size:0.75rem;margin-bottom:14px;">
+      ✅ Copy the <strong>entire token value</strong> (starts with "ey") and paste into the OAuth Token field
+    </div>
+    
+    <div style="text-align:center;">
+      <button class="btn primary" onclick="this.closest('.board-edit-overlay').remove()">Got it!</button>
+    </div>
+  </div>
+  `;
+  
+  document.body.appendChild(modal);
+}
+
+// Paste token from config file (auto-extract)
+function pasteFromConfig() {
+  const modal = document.createElement('div');
+  modal.className = 'board-edit-overlay';
+  modal.style.zIndex = '2500';
+  
+  modal.innerHTML = `
+  <div class="board-edit-modal" style="max-width:550px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:1.05rem;">📋 Paste from Config File</h3>
+      <button onclick="this.closest('.board-edit-overlay').remove()" style="background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--dim);">×</button>
+    </div>
+    
+    <div style="font-size:0.8rem;margin-bottom:14px;padding:12px;background:rgba(88,166,255,0.08);border-radius:8px;">
+      💡 Run this command in your terminal to extract the token:
+    </div>
+    
+    <code style="font-size:0.72rem;display:block;padding:12px;background:rgba(0,0,0,0.4);border-radius:8px;margin-bottom:14px;overflow-x:auto;font-family:monospace;">
+cat ~/.cursor/cli-config.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4
+    </code>
+    
+    <div style="font-size:0.8rem;margin-bottom:8px;color:var(--dim);">Then paste the output here:</div>
+    <textarea id="temp-token-paste" placeholder="Paste token here..." rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);"></textarea>
+    
+    <div style="display:flex;gap:8px;margin-top:14px;">
+      <button class="btn" onclick="this.closest('.board-edit-overlay').remove()" style="flex:1;">Cancel</button>
+      <button class="btn primary" onclick="applyPastedToken()" style="flex:1;">Apply Token</button>
+    </div>
+  </div>
+  `;
+  
+  document.body.appendChild(modal);
+}
+
+// Apply pasted token to form
+function applyPastedToken() {
+  const token = document.getElementById('temp-token-paste').value.trim();
+  if (!token) {
+    alert('⚠️ Please paste a token first.');
+    return;
+  }
+  
+  // Set token in main form
+  document.getElementById('cred-oauth-token').value = token;
+  
+  // Close modal
+  document.querySelector('.board-edit-overlay')?.remove();
+  
+  alert('✅ Token pasted! Click "Save" to store the credential.');
+}
+
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
@@ -16529,6 +16692,68 @@ class CCHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
+            # POST /api/credentials/detect — auto-detect credentials from config files
+            if method == "POST" and path == "/api/credentials/detect":
+                detected = []
+                try:
+                    import json as _json
+                    home = _Path.home()
+                    
+                    # Detect Cursor OAuth token
+                    cursor_config = home / ".cursor" / "cli-config.json"
+                    if cursor_config.exists():
+                        try:
+                            with open(cursor_config) as f:
+                                data = _json.load(f)
+                                token = data.get("token")
+                                if token:
+                                    detected.append({
+                                        "tool": "cursor",
+                                        "type": "oauth",
+                                        "value": token,
+                                        "source": str(cursor_config),
+                                        "preview": token[:20] + "..." if len(token) > 20 else token
+                                    })
+                        except Exception as e:
+                            pass
+                    
+                    # Detect Anthropic API key from env
+                    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+                    if anthropic_key:
+                        detected.append({
+                            "tool": "claude_code",
+                            "type": "api_key",
+                            "value": anthropic_key,
+                            "source": "ANTHROPIC_API_KEY env var",
+                            "preview": anthropic_key[:15] + "..." if len(anthropic_key) > 15 else anthropic_key
+                        })
+                    
+                    # Detect Gemini API key from env
+                    gemini_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+                    if gemini_key:
+                        detected.append({
+                            "tool": "gemini",
+                            "type": "api_key",
+                            "value": gemini_key,
+                            "source": "GOOGLE_API_KEY/GEMINI_API_KEY env var",
+                            "preview": gemini_key[:15] + "..." if len(gemini_key) > 15 else gemini_key
+                        })
+                    
+                    # Detect OpenAI API key from env (for Aider)
+                    openai_key = os.environ.get("OPENAI_API_KEY")
+                    if openai_key:
+                        detected.append({
+                            "tool": "aider",
+                            "type": "api_key",
+                            "value": openai_key,
+                            "source": "OPENAI_API_KEY env var",
+                            "preview": openai_key[:15] + "..." if len(openai_key) > 15 else openai_key
+                        })
+                    
+                    return self._json({"detected": detected, "count": len(detected)})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
             # GET /api/credentials/<tool> — list accounts for tool
             tool_match = re.match(r"^/api/credentials/([a-z_]+)$", path)
             if method == "GET" and tool_match:
@@ -16608,68 +16833,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 try:
                     _cm.set_load_balancing(tool, enabled, strategy)
                     return self._json({"ok": True, "tool": tool, "enabled": enabled, "strategy": strategy})
-                except Exception as e:
-                    return self._json({"error": str(e)}, 500)
-
-            # POST /api/credentials/detect — auto-detect credentials from config files
-            if method == "POST" and path == "/api/credentials/detect":
-                detected = []
-                try:
-                    import json as _json
-                    home = _Path.home()
-                    
-                    # Detect Cursor OAuth token
-                    cursor_config = home / ".cursor" / "cli-config.json"
-                    if cursor_config.exists():
-                        try:
-                            with open(cursor_config) as f:
-                                data = _json.load(f)
-                                token = data.get("token")
-                                if token:
-                                    detected.append({
-                                        "tool": "cursor",
-                                        "type": "oauth",
-                                        "value": token,
-                                        "source": str(cursor_config),
-                                        "preview": token[:20] + "..." if len(token) > 20 else token
-                                    })
-                        except Exception as e:
-                            pass
-                    
-                    # Detect Anthropic API key from env
-                    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-                    if anthropic_key:
-                        detected.append({
-                            "tool": "claude_code",
-                            "type": "api_key",
-                            "value": anthropic_key,
-                            "source": "ANTHROPIC_API_KEY env var",
-                            "preview": anthropic_key[:15] + "..." if len(anthropic_key) > 15 else anthropic_key
-                        })
-                    
-                    # Detect Gemini API key from env
-                    gemini_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-                    if gemini_key:
-                        detected.append({
-                            "tool": "gemini",
-                            "type": "api_key",
-                            "value": gemini_key,
-                            "source": "GOOGLE_API_KEY/GEMINI_API_KEY env var",
-                            "preview": gemini_key[:15] + "..." if len(gemini_key) > 15 else gemini_key
-                        })
-                    
-                    # Detect OpenAI API key from env (for Aider)
-                    openai_key = os.environ.get("OPENAI_API_KEY")
-                    if openai_key:
-                        detected.append({
-                            "tool": "aider",
-                            "type": "api_key",
-                            "value": openai_key,
-                            "source": "OPENAI_API_KEY env var",
-                            "preview": openai_key[:15] + "..." if len(openai_key) > 15 else openai_key
-                        })
-                    
-                    return self._json({"detected": detected, "count": len(detected)})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 

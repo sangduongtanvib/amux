@@ -76,15 +76,36 @@ Sử dụng session token từ browser Claude.ai:
 
 ## 🖱️ Cursor
 
-### Option 1: OAuth Token (Recommended)
+### Option 1: OAuth Token via Browser (Easiest) 🌟
 
-Cursor sử dụng OAuth tokens được lưu trong config file:
+AMUX hỗ trợ **browser-based OAuth login** giống Cursor CLI:
 
-**Auto-Detection:**
+1. Mở AMUX dashboard → tab **Credentials**
+2. Click **+ Add Account** → Tool: **Cursor**
+3. Auth Type: **OAuth Token**
+4. Click nút **🌐 Login via Browser**
+5. Trong modal popup, click **Open Cursor Login**
+6. Login vào Cursor trong browser
+7. Sau khi login, chạy lệnh extract token:
+   ```bash
+   cat ~/.cursor/cli-config.json | grep -o '"token":"[^"]*"' | cut -d'"' -f4
+   ```
+8. Copy token và paste vào form → Click **Save**
+
+### Option 2: Auto-Detection
+
+AMUX tự động detect từ:
 ```bash
-# AMUX tự động detect từ:
 ~/.cursor/cli-config.json
 ```
+
+**Steps:**
+1. Đảm bảo đã login vào Cursor IDE ít nhất 1 lần
+2. AMUX dashboard → tab **Credentials**
+3. Click **🔍 Auto-Detect**
+4. Chọn Cursor OAuth token → Click **Import Selected**
+
+### Option 3: Manual from CLI Config
 
 **Manual Setup:**
 
