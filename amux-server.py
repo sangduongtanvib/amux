@@ -5463,6 +5463,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-reports" onclick="switchView('reports')">Reports</button>
   <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
+  <button id="tab-credentials" onclick="switchView('credentials')">Credentials</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
@@ -5564,6 +5565,54 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div id="email-events-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:8px;"></div>
 </div>
+
+<!-- Credentials view -->
+<div id="credentials-view" style="display:none;">
+  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">Credential Management</span>
+    <div style="flex:1;"></div>
+    <button class="btn" onclick="openAddCredential()" style="font-size:0.78rem;padding:4px 10px;">+ Add Account</button>
+  </div>
+  <div style="margin:0 12px 8px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
+    Manage API keys and authentication for AI tools. <strong style="color:var(--text);">Load balancing</strong> distributes requests across multiple accounts to avoid rate limits.
+    <span style="display:block;margin-top:4px;">Credentials are encrypted with AES-128 and stored in <code style="color:var(--accent);">~/.amux/credentials/</code></span>
+  </div>
+  <div id="credentials-tools-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:12px;"></div>
+  
+  <!-- Add/Edit Credential Modal -->
+  <div id="add-credential-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeAddCredential()" style="display:none;">
+    <div class="board-edit-box" style="max-width:480px;">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;" id="cred-modal-title">Add Account</div>
+      <div class="field-group">
+        <label class="field-label">Tool</label>
+        <select id="cred-tool" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem;">
+          <option value="claude_code">Claude Code</option>
+          <option value="cursor">Cursor</option>
+          <option value="gemini">Gemini</option>
+          <option value="aider">Aider</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Account ID</label>
+        <input id="cred-account-id" type="text" placeholder="default, account1, user@example.com" autocomplete="off" style="width:100%;box-sizing:border-box;">
+        <div style="font-size:0.7rem;color:var(--dim);margin-top:2px;">Unique identifier for this account (e.g., email or name)</div>
+      </div>
+      <div class="field-group" id="cred-api-key-group">
+        <label class="field-label">API Key</label>
+        <input id="cred-api-key" type="password" placeholder="sk-ant-..." autocomplete="off" style="width:100%;box-sizing:border-box;font-family:monospace;">
+      </div>
+      <div class="field-group" id="cred-oauth-group" style="display:none;">
+        <label class="field-label">OAuth Token</label>
+        <textarea id="cred-oauth-token" placeholder="{...}" rows="4" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:0.75rem;"></textarea>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button class="btn" onclick="closeAddCredential()" style="flex:1;">Cancel</button>
+        <button class="btn primary" onclick="submitAddCredential()" style="flex:1;">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Reports view -->
 <div id="reports-view" style="display:none;">
   <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;">
@@ -11175,6 +11224,208 @@ function _fmtRelTime(ts) {
   return Math.floor(diff/86400) + 'd ago';
 }
 
+// ═══════ CREDENTIALS ═══════
+let credentialsData = {};
+
+async function loadCredentials() {
+  try {
+    const resp = await fetch(API + '/api/credentials');
+    if (!resp.ok) throw new Error('Failed to load credentials');
+    credentialsData = await resp.json();
+    renderCredentials();
+  } catch(e) {
+    console.error('Error loading credentials:', e);
+    document.getElementById('credentials-tools-list').innerHTML = 
+      '<div style="padding:20px;text-align:center;color:var(--dim);">Failed to load credentials</div>';
+  }
+}
+
+async function renderCredentials() {
+  const container = document.getElementById('credentials-tools-list');
+  const tools = Object.keys(credentialsData);
+  
+  if (tools.length === 0) {
+    container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--dim);">No credentials configured. Click "+ Add Account" to get started.</div>';
+    return;
+  }
+  
+  let html = '';
+  for (const tool of tools) {
+    const toolData = credentialsData[tool];
+    const accounts = toolData.accounts || [];
+    const lb = toolData.load_balancing || {enabled: false, strategy: 'round_robin'};
+    
+    const toolNames = {
+      claude_code: 'Claude Code',
+      cursor: 'Cursor',
+      gemini: 'Gemini',
+      aider: 'Aider'
+    };
+    
+    html += `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;">`;
+    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">`;
+    html += `<span style="font-weight:600;font-size:0.88rem;flex:1;">${toolNames[tool] || tool}</span>`;
+    html += `<span style="font-size:0.72rem;color:var(--dim);">${accounts.length} account${accounts.length !== 1 ? 's' : ''}</span>`;
+    html += `</div>`;
+    
+    // Load balancing controls
+    html += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px;">`;
+    html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">`;
+    html += `<input type="checkbox" id="lb-${tool}" ${lb.enabled ? 'checked' : ''} onchange="toggleLoadBalancing('${tool}', this.checked)" style="cursor:pointer;">`;
+    html += `<label for="lb-${tool}" style="font-size:0.78rem;font-weight:500;cursor:pointer;">Load Balancing</label>`;
+    html += `<div style="flex:1;"></div>`;
+    html += `<select id="lbs-${tool}" onchange="changeStrategy('${tool}', this.value)" ${!lb.enabled ? 'disabled' : ''} style="font-size:0.72rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);">`;
+    html += `<option value="round_robin" ${lb.strategy === 'round_robin' ? 'selected' : ''}>Round Robin</option>`;
+    html += `<option value="least_used" ${lb.strategy === 'least_used' ? 'selected' : ''}>Least Used</option>`;
+    html += `<option value="random" ${lb.strategy === 'random' ? 'selected' : ''}>Random</option>`;
+    html += `</select>`;
+    html += `</div>`;
+    html += `<div style="font-size:0.68rem;color:var(--dim);">Distributes requests across accounts to avoid rate limits</div>`;
+    html += `</div>`;
+    
+    // Accounts list
+    for (const accountId of accounts) {
+      const accountResp = await fetch(API + `/api/credentials/${tool}`);
+      const accountsData = await accountResp.json();
+      const account = accountsData.accounts.find(a => a.account_id === accountId);
+      
+      if (!account) continue;
+      
+      const usageCount = account.usage_count || 0;
+      const lastUsed = account.last_used ? _fmtRelTime(account.last_used) : 'never';
+      const enabled = account.enabled !== false;
+      
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-bottom:4px;${!enabled ? 'opacity:0.5;' : ''}">`;
+      html += `<div style="flex:1;min-width:0;">`;
+      html += `<div style="font-size:0.78rem;font-weight:500;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;">${accountId}</div>`;
+      html += `<div style="font-size:0.68rem;color:var(--dim);">Used ${usageCount}x • ${lastUsed}</div>`;
+      html += `</div>`;
+      html += `<button oc="toggleAccountEnabled('${tool}', '${accountId}', ${!enabled})" style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;">${enabled ? '✓' : '○'}</button>`;
+      html += `<button onclick="deleteCredentialAccount('${tool}', '${accountId}')" style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--red);cursor:pointer;">Delete</button>`;
+      html += `</div>`;
+    }
+    
+    html += `<button onclick="openAddCredentialForTool('${tool}')" style="margin-top:6px;width:100%;font-size:0.75rem;padding:4px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--dim);cursor:pointer;">+ Add account</button>`;
+    html += `</div>`;
+  }
+  
+  container.innerHTML = html;
+}
+
+function openAddCredential() {
+  document.getElementById('cred-modal-title').textContent = 'Add Account';
+  document.getElementById('cred-tool').value = 'claude_code';
+  document.getElementById('cred-account-id').value = '';
+  document.getElementById('cred-api-key').value = '';
+  document.getElementById('cred-oauth-token').value = '';
+  document.getElementById('add-credential-overlay').style.display = 'flex';
+  document.getElementById('cred-account-id').focus();
+}
+
+function openAddCredentialForTool(tool) {
+  document.getElementById('cred-modal-title').textContent = `Add Account for ${tool}`;
+  document.getElementById('cred-tool').value = tool;
+  document.getElementById('cred-tool').disabled = true;
+  document.getElementById('cred-account-id').value = '';
+  document.getElementById('cred-api-key').value = '';
+  document.getElementById('cred-oauth-token').value = '';
+  document.getElementById('add-credential-overlay').style.display = 'flex';
+  document.getElementById('cred-account-id').focus();
+}
+
+function closeAddCredential() {
+  document.getElementById('cred-tool').disabled = false;
+  document.getElementById('add-credential-overlay').style.display = 'none';
+}
+
+async function submitAddCredential() {
+  const tool = document.getElementById('cred-tool').value;
+  const accountId = document.getElementById('cred-account-id').value.trim() || 'default';
+  const apiKey = document.getElementById('cred-api-key').value.trim();
+  const oauthToken = document.getElementById('cred-oauth-token').value.trim();
+  
+  if (!apiKey && !oauthToken) {
+    alert('Please provide credentials');
+    return;
+  }
+  
+  const credentials = {};
+  if (apiKey) {
+    if (tool === 'claude_code' || tool === 'aider') credentials.anthropic_api_key = apiKey;
+    else if (tool === 'gemini') credentials.google_api_key = apiKey;
+    else if (tool === 'cursor') credentials.oauth_token = apiKey;
+  }
+  if (oauthToken) credentials.oauth_token = oauthToken;
+  
+  try {
+    const resp = await fetch(API + `/api/credentials/${tool}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_id: accountId, credentials})
+    });
+    
+    if (!resp.ok) throw new Error('Failed to save credential');
+    
+    closeAddCredential();
+    loadCredentials();
+  } catch(e) {
+    alert('Error saving credential: ' + e.message);
+  }
+}
+
+async function deleteCredentialAccount(tool, accountId) {
+  if (!confirm(`Delete account "${accountId}" for ${tool}?`)) return;
+  
+  try {
+    await fetch(API + `/api/credentials/${tool}/${encodeURIComponent(accountId)}`, {method: 'DELETE'});
+    loadCredentials();
+  } catch(e) {
+    alert('Error deleting account: ' + e.message);
+  }
+}
+
+async function toggleAccountEnabled(tool, accountId, enabled) {
+  try {
+    await fetch(API + `/api/credentials/${tool}/${encodeURIComponent(accountId)}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled})
+    });
+    loadCredentials();
+  } catch(e) {
+    alert('Error updating account: ' + e.message);
+  }
+}
+
+async function toggleLoadBalancing(tool, enabled) {
+  const strategy = document.getElementById(`lbs-${tool}`).value;
+  document.getElementById(`lbs-${tool}`).disabled = !enabled;
+  
+  try {
+    await fetch(API + `/api/credentials/${tool}/load-balancing`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled, strategy})
+    });
+    loadCredentials();
+  } catch(e) {
+    alert('Error updating load balancing: ' + e.message);
+  }
+}
+
+async function changeStrategy(tool, strategy) {
+  try {
+    await fetch(API + `/api/credentials/${tool}/load-balancing`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: true, strategy})
+    });
+    loadCredentials();
+  } catch(e) {
+    alert('Error updating strategy: ' + e.message);
+  }
+}
+
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
@@ -11245,6 +11496,7 @@ function switchView(view) {
   document.getElementById('calendar-view').style.display = view === 'calendar' ? '' : 'none';
   document.getElementById('reports-view').style.display = view === 'reports' ? '' : 'none';
   document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
+  document.getElementById('credentials-view').style.display = view === 'credentials' ? '' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
@@ -11254,6 +11506,7 @@ function switchView(view) {
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
   document.getElementById('tab-reports').classList.toggle('active', view === 'reports');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
+  document.getElementById('tab-credentials').classList.toggle('active', view === 'credentials');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
   document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
@@ -11262,6 +11515,7 @@ function switchView(view) {
   if (view === 'reports') fetchReports();
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
+  if (view === 'credentials') loadCredentials();
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
@@ -15876,6 +16130,113 @@ class CCHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        # ── Credentials API ───────────────────────────────────────────────────
+        if path == "/api/credentials" or path.startswith("/api/credentials/"):
+            from pathlib import Path as _Path
+            import sys as _sys
+            # Import CredentialManager
+            _cred_mgr_path = _Path(__file__).parent / "credential-manager.py"
+            if _cred_mgr_path.exists():
+                import importlib.util as _imp
+                _spec = _imp.spec_from_file_location("credential_manager", _cred_mgr_path)
+                _cred_mod = _imp.module_from_spec(_spec)
+                _spec.loader.exec_module(_cred_mod)
+                _cm = _cred_mod.CredentialManager()
+            else:
+                return self._json({"error": "credential-manager.py not found"}, 500)
+
+            # GET /api/credentials — list all tools and accounts
+            if method == "GET" and path == "/api/credentials":
+                try:
+                    summary = _cm.list_credentials()
+                    return self._json(summary)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/credentials/<tool> — list accounts for tool
+            tool_match = re.match(r"^/api/credentials/([a-z_]+)$", path)
+            if method == "GET" and tool_match:
+                tool = tool_match.group(1)
+                try:
+                    accounts = _cm.list_accounts(tool)
+                    return self._json({"tool": tool, "accounts": accounts})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/credentials/<tool> — add/update account
+            if method == "POST" and tool_match:
+                tool = tool_match.group(1)
+                body = self._read_body()
+                account_id = body.get("account_id", "default").strip()
+                credentials = body.get("credentials", {})
+                
+                if not credentials:
+                    return self._json({"error": "missing credentials"}, 400)
+                
+                try:
+                    # Set each credential type
+                    for cred_type, value in credentials.items():
+                        _cm.set_credential(tool, cred_type, value, account_id=account_id)
+                    
+                    return self._json({"ok": True, "tool": tool, "account_id": account_id}, 201)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # DELETE /api/credentials/<tool>/<account_id> — delete account
+            account_match = re.match(r"^/api/credentials/([a-z_]+)/([a-zA-Z0-9._@-]+)$", path)
+            if method == "DELETE" and account_match:
+                tool = account_match.group(1)
+                account_id = account_match.group(2)
+                
+                try:
+                    _cm.delete_account(tool, account_id)
+                    return self._json({"ok": True, "tool": tool, "account_id": account_id})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # PATCH /api/credentials/<tool>/<account_id> — update account
+            if method == "PATCH" and account_match:
+                tool = account_match.group(1)
+                account_id = account_match.group(2)
+                body = self._read_body()
+                
+                try:
+                    # Update credentials if provided
+                    if "credentials" in body:
+                        for cred_type, value in body["credentials"].items():
+                            _cm.set_credential(tool, cred_type, value, account_id=account_id)
+                    
+                    # Update enabled status if provided
+                    if "enabled" in body:
+                        creds = _cm._load_credentials()
+                        if tool in creds and "accounts" in creds[tool]:
+                            if account_id in creds[tool]["accounts"]:
+                                creds[tool]["accounts"][account_id]["metadata"]["enabled"] = bool(body["enabled"])
+                                _cm._save_credentials(creds)
+                    
+                    return self._json({"ok": True, "tool": tool, "account_id": account_id})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/credentials/<tool>/load-balancing — configure load balancing
+            lb_match = re.match(r"^/api/credentials/([a-z_]+)/load-balancing$", path)
+            if method == "POST" and lb_match:
+                tool = lb_match.group(1)
+                body = self._read_body()
+                enabled = body.get("enabled", True)
+                strategy = body.get("strategy", "round_robin")
+                
+                if strategy not in ("round_robin", "least_used", "random"):
+                    return self._json({"error": "invalid strategy (must be: round_robin, least_used, random)"}, 400)
+                
+                try:
+                    _cm.set_load_balancing(tool, enabled, strategy)
+                    return self._json({"ok": True, "tool": tool, "enabled": enabled, "strategy": strategy})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            return self._json({"error": "not found"}, 404)
 
 
         # ── Schedules API ─────────────────────────────────────────────────────
