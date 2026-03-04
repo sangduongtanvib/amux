@@ -22,6 +22,16 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+# Import credential manager for AI tool authentication
+try:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from credential_manager import CredentialManager
+    _CRED_MANAGER = CredentialManager()
+except ImportError:
+    print("Warning: credential-manager not available. Some auth features disabled.")
+    _CRED_MANAGER = None
+
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
     os.environ.pop(_cv, None)
@@ -3091,14 +3101,30 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 break
         else:
             shell_rc += f"cd {shlex.quote(work_dir)}; "
-        subprocess.run(
-            ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
-             "-e", "TMUX_SESSION_NAME=" + name,
-             "-e", "AMUX_SESSION=" + name,
-             "-e", "AMUX_URL=https://localhost:8822",
-             shell_rc + cmd],
-            check=True, capture_output=True, timeout=10,
-        )
+        
+        # Build tmux command with base environment variables
+        tmux_cmd = [
+            "tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
+            "-e", "TMUX_SESSION_NAME=" + name,
+            "-e", "AMUX_SESSION=" + name,
+            "-e", "AMUX_URL=https://localhost:8822",
+        ]
+        
+        # Inject credentials from credential manager
+        if _CRED_MANAGER:
+            try:
+                cred_env = _CRED_MANAGER.get_env_vars(tool_name)
+                for env_key, env_val in cred_env.items():
+                    tmux_cmd.extend(["-e", f"{env_key}={env_val}"])
+                if cred_env:
+                    print(f"[credential] Injected {len(cred_env)} env vars for {tool_name}")
+            except Exception as e:
+                print(f"[credential] Warning: Failed to inject credentials: {e}")
+        
+        # Add the shell command
+        tmux_cmd.append(shell_rc + cmd)
+        
+        subprocess.run(tmux_cmd, check=True, capture_output=True, timeout=10)
         # Lock the window name immediately (before Claude output can rename it)
         subprocess.run(
             ["tmux", "set-option", "-t", tmux_sess, "allow-rename", "off"],
