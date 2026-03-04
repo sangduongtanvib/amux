@@ -60,6 +60,151 @@ UPLOAD_ALLOWED_EXTS = {
 }
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
+CURSOR_HOME = Path.home() / ".cursor"
+
+# ═══════════════════════════════════════════
+# AI TOOL CONFIGURATION SYSTEM
+# ═══════════════════════════════════════════
+
+class AITool:
+    """Abstract base class for AI tool integration."""
+    
+    def __init__(self, name: str):
+        self.name = name
+    
+    def get_command(self, flags: str, session_flag: str, default_flags: str, extra_flags: str) -> str:
+        """Build the command to start this tool."""
+        raise NotImplementedError()
+    
+    def detect_status(self, raw_output: str) -> str:
+        """Parse terminal output to detect tool status.
+        Returns: working | needs_input | idle | error
+        """
+        raise NotImplementedError()
+    
+    def get_home_dir(self) -> Path:
+        """Return the tool's home directory."""
+        raise NotImplementedError()
+    
+    def supports_conversation_id(self) -> bool:
+        """Whether this tool supports conversation/session ID isolation."""
+        return False
+
+
+class ClaudeCodeTool(AITool):
+    """Claude Code CLI integration."""
+    
+    def __init__(self):
+        super().__init__("claude_code")
+    
+    def get_command(self, flags: str, session_flag: str, default_flags: str, extra_flags: str) -> str:
+        cmd = "claude"
+        if default_flags:
+            cmd += f" {default_flags}"
+        if flags:
+            cmd += f" {flags}"
+        if session_flag:
+            cmd += f" {session_flag}"
+        if extra_flags:
+            cmd += f" {extra_flags}"
+        # Default to sonnet if no --model specified
+        if "--model" not in cmd:
+            cmd += " --model sonnet"
+        return cmd
+    
+    def detect_status(self, raw_output: str) -> str:
+        """Detect Claude Code status from tmux output."""
+        if not raw_output:
+            return "idle"
+        
+        last_lines = raw_output.split("\n")[-15:]  # Check last 15 lines
+        last_output = "\n".join(last_lines)
+        
+        # Claude-specific UI patterns
+        if "? Press Y to approve" in last_output or "? Type \"proceed\"" in last_output:
+            return "needs_input"
+        if "✻ Brewing" in last_output or "⠋" in last_output or "⠙" in last_output:
+            return "working"
+        if "Error:" in last_output or "ENOENT" in last_output:
+            return "error"
+        if "›" in last_output and len(last_output.strip()) < 100:
+            return "idle"
+        
+        return "idle"
+    
+    def get_home_dir(self) -> Path:
+        return CLAUDE_HOME
+    
+    def supports_conversation_id(self) -> bool:
+        return True
+
+
+class CursorTool(AITool):
+    """Cursor CLI (agent command) integration."""
+    
+    def __init__(self):
+        super().__init__("cursor")
+    
+    def get_command(self, flags: str, session_flag: str, default_flags: str, extra_flags: str) -> str:
+        cmd = "agent"
+        if default_flags:
+            cmd += f" {default_flags}"
+        if flags:
+            cmd += f" {flags}"
+        # Cursor uses --continue for resuming, not --resume
+        if session_flag:
+            # Map Claude's --resume to Cursor's --continue
+            if "--resume" in session_flag:
+                cmd += " --continue"
+            elif "--session-id" in session_flag:
+                # Cursor doesn't have explicit session-id, uses auto-save
+                pass
+            else:
+                cmd += f" {session_flag}"
+        if extra_flags:
+            cmd += f" {extra_flags}"
+        # Default model if specified
+        if "--model" not in cmd and "--model" in (flags or ""):
+            pass  # Already included in flags
+        return cmd
+    
+    def detect_status(self, raw_output: str) -> str:
+        """Detect Cursor agent status from tmux output."""
+        if not raw_output:
+            return "idle"
+        
+        last_lines = raw_output.split("\n")[-15:]
+        last_output = "\n".join(last_lines)
+        
+        # Cursor-specific patterns
+        if "Approve?" in last_output or "Continue?" in last_output:
+            return "needs_input"
+        if "Thinking" in last_output or "Working" in last_output or "●" in last_output:
+            return "working"
+        if "Error" in last_output or "Failed" in last_output:
+            return "error"
+        if ">" in last_output and len([l for l in last_lines if l.strip()]) < 3:
+            return "idle"
+        
+        return "idle"
+    
+    def get_home_dir(self) -> Path:
+        return CURSOR_HOME
+    
+    def supports_conversation_id(self) -> bool:
+        return True  # Cursor has session management
+
+
+# AI Tool Registry
+_AI_TOOLS = {
+    "claude_code": ClaudeCodeTool(),
+    "cursor": CursorTool(),
+}
+
+
+def get_ai_tool(tool_name: str) -> AITool:
+    """Get AI tool instance by name, defaults to claude_code."""
+    return _AI_TOOLS.get(tool_name, _AI_TOOLS["claude_code"])
 
 # S3 iCal public sync (optional — set AMUX_S3_BUCKET to enable)
 _S3_BUCKET = os.environ.get("AMUX_S3_BUCKET", "")
@@ -1158,7 +1303,9 @@ def _snapshot_all_sessions():
                             + (" — last message replayed" if last_msg else ""))
 
             # ── 3. Auto-continue: unblock waiting sessions ───────────────────
-            status = _detect_claude_status(clean)
+            cfg_tool = parse_env_file(f)
+            tool_name = cfg_tool.get("CC_TOOL", "claude_code")
+            status = _detect_claude_status(clean, tool_name)
 
             # ── 3a. Post-compact continuation ──────────────────────────────────
             # After we trigger auto-compact, the session goes idle at the ❯ prompt.
@@ -2336,16 +2483,43 @@ def get_daily_token_stats() -> dict:
     }
 
 
-def _detect_claude_status(raw_output: str) -> str:
-    """Detect Claude Code status from tmux output.
+def _detect_claude_status(raw_output: str, tool_name: str = "claude_code") -> str:
+    """Detect AI tool status from tmux output using tool-specific parser.
 
-    Uses Claude Code's known terminal UI patterns to determine state.
+    Uses tool-specific terminal UI patterns to determine state.
     Scans bottom-up for the most recent definitive signal.
 
-    Returns: 'active', 'waiting', 'idle', or ''.
+    Returns: 'active', 'waiting', 'idle' (mapped from tool's detection).
     """
     if not raw_output:
         return ""
+    
+    # Use tool-specific status detection
+    ai_tool = get_ai_tool(tool_name)
+    tool_status = ai_tool.detect_status(raw_output)
+    
+    # Map tool status to amux status format
+    status_map = {
+        "working": "active",
+        "needs_input": "waiting",
+        "idle": "idle",
+        "error": "idle",  # Treat errors as idle for now
+    }
+    amux_status = status_map.get(tool_status, "")
+    
+    # If using Claude Code, also do the legacy detailed detection
+    if tool_name == "claude_code" and amux_status == "":
+        # Fallback to original Claude-specific detailed detection
+        return _detect_claude_status_legacy(raw_output)
+    
+    return amux_status
+
+
+def _detect_claude_status_legacy(raw_output: str) -> str:
+    """Original Claude Code status detection with detailed pattern matching.
+    
+    Returns: 'active', 'waiting', 'idle', or ''.
+    """
     clean = re.sub(
         r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
         r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]',
@@ -2530,7 +2704,8 @@ def list_sessions() -> list:
             lines = [l for l in raw.splitlines() if l.strip()]
             preview = strip_ansi(lines[-1][:120]) if lines else ""
             if running:
-                status = _detect_claude_status(raw)
+                tool_name = cfg.get("CC_TOOL", "claude_code")
+                status = _detect_claude_status(raw, tool_name)
             # Filter for intelligible content lines
             intelligible = []
             for l in lines:
@@ -2869,11 +3044,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     flags = cfg.get("CC_FLAGS", "")
     _ensure_memory(name, work_dir)
 
-    # Determine session-specific conversation ID for isolation.
-    # Each amux session keeps its own Claude conversation, regardless of directory.
-    # Skip when the caller supplies explicit conversation flags (e.g. clone --fork-session).
+    # Get AI tool type from config (default: claude_code)
+    tool_name = cfg.get("CC_TOOL", "claude_code")
+    ai_tool = get_ai_tool(tool_name)
+
+    # Determine session-specific conversation ID for isolation (if supported by tool)
     meta = _load_meta(name)
-    if not _skip_conv_id:
+    session_flag = ""
+    if not _skip_conv_id and ai_tool.supports_conversation_id():
         conv_id = meta.get("cc_conversation_id", "")
         if not conv_id:
             # First start — generate a fresh UUID so this session gets its own conversation
@@ -2882,16 +3060,13 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             session_flag = f"--session-id {conv_id}"
         else:
             # Subsequent start — resume this session's own conversation
-            conv_file = (
-                CLAUDE_HOME / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
-            )
+            tool_home = ai_tool.get_home_dir()
+            conv_file = tool_home / "projects" / _project_name(work_dir) / f"{conv_id}.jsonl"
             if conv_file.exists():
                 session_flag = f"--resume {conv_id}"
             else:
                 # Conversation was cleared/deleted — start fresh with the same ID
                 session_flag = f"--session-id {conv_id}"
-    else:
-        session_flag = ""
 
     # Load defaults
     defaults_file = CC_HOME / "defaults.env"
@@ -2900,18 +3075,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         dcfg = parse_env_file(defaults_file)
         default_flags = dcfg.get("CC_DEFAULT_FLAGS", "")
 
-    cmd = "claude"
-    if default_flags:
-        cmd += f" {default_flags}"
-    if flags:
-        cmd += f" {flags}"
-    if session_flag:
-        cmd += f" {session_flag}"
-    if extra_flags:
-        cmd += f" {extra_flags}"
-    # Default to sonnet if no --model specified anywhere
-    if "--model" not in cmd:
-        cmd += " --model sonnet"
+    # Build command using tool-specific builder
+    cmd = ai_tool.get_command(flags, session_flag, default_flags, extra_flags)
     try:
         tmux_sess = tmux_name(name)
         # Create session with window naming options set upfront so Claude
@@ -5720,6 +5885,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           oninput="acFetch(this.value)" onfocus="acFetch(this.value)"
           onpaste="_acSuppressNext=true" onkeydown="acKeydown(event)">
         <div id="ac-list" class="ac-list"></div>
+      </div>
+    </div>
+    <div class="field-group">
+      <label class="field-label">AI Tool</label>
+      <select id="create-tool" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.9rem;">
+        <option value="claude_code" selected>Claude Code (claude)</option>
+        <option value="cursor">Cursor CLI (agent)</option>
+      </select>
+      <div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">
+        Select which AI coding tool this session will use
       </div>
     </div>
     <div class="field-group" id="create-template-field">
@@ -10207,6 +10382,7 @@ async function _suggestBranch() {
 async function submitCreate() {
   const name = document.getElementById('create-name').value.trim();
   const dir = document.getElementById('create-dir').value.trim();
+  const tool = document.getElementById('create-tool').value || 'claude_code';
   const typedPrompt = document.getElementById('create-prompt').value.trim();
   // Use typed prompt, fall back to template's initial_prompt if field is empty
   const prompt = typedPrompt || (_selectedTemplate && _selectedTemplate.initial_prompt ? _selectedTemplate.initial_prompt : '');
@@ -10226,7 +10402,7 @@ async function submitCreate() {
   // Online: create immediately, optionally queue prompt
   const r = await apiCall(API + '/api/sessions', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ name, dir, creator: _getDeviceName() })
+    body: JSON.stringify({ name, dir, tool, creator: _getDeviceName() })
   });
   if (r && r.ok) {
     if (dir) _addRecentDir(dir);
@@ -16018,6 +16194,10 @@ class CCHandler(BaseHTTPRequestHandler):
             cfg = {}
             if dir_path:
                 cfg["CC_DIR"] = dir_path
+            # AI tool selection (default: claude_code)
+            tool = body.get("tool", "claude_code").strip()
+            if tool and tool in _AI_TOOLS:
+                cfg["CC_TOOL"] = tool
             desc = body.get("desc", "").strip()
             if desc:
                 cfg["CC_DESC"] = desc
