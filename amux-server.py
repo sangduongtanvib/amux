@@ -3142,6 +3142,14 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     tool_name = cfg.get("CC_TOOL", "claude_code")
     ai_tool = get_ai_tool(tool_name)
 
+    # Auto-inject --mcp-config flag if mcp.json exists (for Claude Code CLI)
+    mcp_file = Path(work_dir) / "mcp.json"
+    if tool_name == "claude_code" and mcp_file.exists():
+        # Use session-specific MCP config, ignore global config
+        mcp_flag = f"--mcp-config {shlex.quote(str(mcp_file))} --strict-mcp-config"
+        if mcp_flag not in flags:
+            flags = f"{flags} {mcp_flag}".strip()
+
     # Determine session-specific conversation ID for isolation (if supported by tool)
     meta = _load_meta(name)
     session_flag = ""
@@ -5426,9 +5434,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
-  No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
-</div>
+# <div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
+#   No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
+# </div>
 
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
