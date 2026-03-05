@@ -5810,6 +5810,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <option value="claude">Claude Desktop</option>
       <option value="cursor">Cursor</option>
     </select>
+    <button class="btn" onclick="formatMCPEditor()" style="font-size:0.78rem;padding:4px 10px;" title="Format JSON (pretty-print)">✨ Format</button>
+    <button class="btn" onclick="minifyMCPEditor()" style="font-size:0.78rem;padding:4px 10px;" title="Minify JSON (compact)">📦 Minify</button>
     <button class="btn" onclick="loadDesktopMCPForEdit()" style="font-size:0.78rem;padding:4px 10px;">🔄 Reload</button>
     <button class="btn" onclick="copyMCPEditorContent()" style="font-size:0.78rem;padding:4px 10px;">📋 Copy</button>
     <button class="btn" onclick="saveDesktopMCPFromEditor()" style="font-size:0.78rem;padding:4px 10px;background:var(--accent);color:#000;">💾 Save</button>
@@ -5818,14 +5820,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     Edit <strong style="color:var(--text);">Model Context Protocol</strong> configs directly from desktop app files.
     <span style="display:block;margin-top:6px;">Changes are saved immediately to the source file (Claude Desktop or Cursor).</span>
   </div>
-  <div style="margin:0 12px 8px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.72rem;color:var(--dim);font-family:monospace;display:flex;align-items:center;gap:8px;">
-    <span style="color:var(--text);">📁</span>
-    <span id="mcp-file-path" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No file selected</span>
+  <div style="margin:0 12px 8px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:200px;">
+      <span style="color:var(--text);flex-shrink:0;">📁</span>
+      <span id="mcp-file-path" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.72rem;color:var(--dim);font-family:monospace;">No file selected</span>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:0.75rem;color:var(--dim);cursor:pointer;flex-shrink:0;">
+      <input type="checkbox" id="mcp-auto-format" onchange="saveMCPEditorPrefs()" checked style="width:14px;height:14px;">
+      <span>Auto-format on load</span>
+    </label>
   </div>
+  <div id="mcp-validation-error" style="display:none;margin:0 12px 8px;padding:8px 12px;background:rgba(248,81,73,0.1);border:1px solid var(--red);border-radius:4px;font-size:0.75rem;color:var(--red);font-family:monospace;line-height:1.5;"></div>
   <div style="margin:0 12px 12px;display:flex;flex-direction:column;flex:1;">
     <textarea
       id="mcp-editor"
       placeholder="Select an app to edit its MCP configuration..."
+      oninput="validateMCPEditor()"
       style="width:100%;min-height:500px;padding:12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.8rem;font-family:'SF Mono','Fira Code',monospace;line-height:1.6;resize:vertical;box-sizing:border-box;"
     ></textarea>
     <div style="margin-top:8px;font-size:0.7rem;color:var(--dim);display:flex;align-items:center;gap:8px;">
@@ -12141,10 +12151,20 @@ async function loadDesktopMCPForEdit() {
     
     // Format and display mcpServers JSON
     const mcpServers = data.mcpServers || {};
-    const jsonStr = JSON.stringify(mcpServers, null, 2);
+    let jsonStr;
+    
+    // Check auto-format preference
+    const autoFormat = document.getElementById('mcp-auto-format')?.checked;
+    if (autoFormat) {
+      jsonStr = JSON.stringify(mcpServers, null, 2);
+    } else {
+      jsonStr = JSON.stringify(mcpServers);
+    }
+    
     document.getElementById('mcp-editor').value = jsonStr;
     
     updateMCPEditorStats();
+    validateMCPEditor();
     statusEl.textContent = `Loaded ${data.app}`;
     statusEl.style.color = 'var(--green)';
     
@@ -12250,12 +12270,114 @@ async function copyMCPEditorContent() {
   }
 }
 
+function formatMCPEditor() {
+  const editor = document.getElementById('mcp-editor');
+  const text = editor.value.trim();
+  
+  if (!text) {
+    alert('⚠️ Editor is empty');
+    return;
+  }
+  
+  try {
+    const parsed = JSON.parse(text);
+    const formatted = JSON.stringify(parsed, null, 2);
+    editor.value = formatted;
+    updateMCPEditorStats();
+    
+    const statusEl = document.getElementById('mcp-editor-status');
+    statusEl.textContent = '✨ Formatted';
+    statusEl.style.color = 'var(--accent)';
+    setTimeout(() => {
+      if (_mcpEditorData) {
+        statusEl.textContent = `Loaded ${_mcpEditorData.app}`;
+        statusEl.style.color = 'var(--green)';
+      }
+    }, 1500);
+  } catch(e) {
+    alert('❌ Cannot format - Invalid JSON:\n\n' + e.message);
+  }
+}
+
+function minifyMCPEditor() {
+  const editor = document.getElementById('mcp-editor');
+  const text = editor.value.trim();
+  
+  if (!text) {
+    alert('⚠️ Editor is empty');
+    return;
+  }
+  
+  try {
+    const parsed = JSON.parse(text);
+    const minified = JSON.stringify(parsed);
+    editor.value = minified;
+    updateMCPEditorStats();
+    
+    const statusEl = document.getElementById('mcp-editor-status');
+    statusEl.textContent = '📦 Minified';
+    statusEl.style.color = 'var(--accent)';
+    setTimeout(() => {
+      if (_mcpEditorData) {
+        statusEl.textContent = `Loaded ${_mcpEditorData.app}`;
+        statusEl.style.color = 'var(--green)';
+      }
+    }, 1500);
+  } catch(e) {
+    alert('❌ Cannot minify - Invalid JSON:\n\n' + e.message);
+  }
+}
+
+let _mcpValidationTimeout = null;
+function validateMCPEditor() {
+  // Debounce validation
+  clearTimeout(_mcpValidationTimeout);
+  _mcpValidationTimeout = setTimeout(() => {
+    const editor = document.getElementById('mcp-editor');
+    const errorDiv = document.getElementById('mcp-validation-error');
+    const text = editor.value.trim();
+    
+    if (!text) {
+      errorDiv.style.display = 'none';
+      editor.style.borderColor = '';
+      return;
+    }
+    
+    try {
+      JSON.parse(text);
+      errorDiv.style.display = 'none';
+      editor.style.borderColor = '';
+    } catch(e) {
+      errorDiv.textContent = '⚠️ JSON Error: ' + e.message;
+      errorDiv.style.display = 'block';
+      editor.style.borderColor = 'var(--red)';
+    }
+  }, 500);
+  
+  updateMCPEditorStats();
+}
+
+function saveMCPEditorPrefs() {
+  const autoFormat = document.getElementById('mcp-auto-format').checked;
+  localStorage.setItem('mcpAutoFormat', autoFormat ? '1' : '0');
+}
+
+function loadMCPEditorPrefs() {
+  const autoFormat = localStorage.getItem('mcpAutoFormat');
+  if (autoFormat === '0') {
+    document.getElementById('mcp-auto-format').checked = false;
+  } else {
+    document.getElementById('mcp-auto-format').checked = true;
+  }
+}
+
 // Update line count on typing
 document.addEventListener('DOMContentLoaded', function() {
   const editor = document.getElementById('mcp-editor');
   if (editor) {
     editor.addEventListener('input', updateMCPEditorStats);
   }
+  loadMCPEditorPrefs();
 });
 
 // ═══════ BOARD ═══════
