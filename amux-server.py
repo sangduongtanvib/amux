@@ -5434,9 +5434,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-# <div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
-#   No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
-# </div>
 
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
@@ -17681,6 +17678,143 @@ class CCHandler(BaseHTTPRequestHandler):
 
             return self._json({"error": "not found"}, 404)
 
+
+        # ── Desktop MCP Configs API ───────────────────────────────────────────
+        # Read/write MCP configs directly from desktop app config files
+        if path.startswith("/api/desktop-mcp"):
+            # Define desktop app config locations
+            DESKTOP_CONFIGS = {
+                "claude": {
+                    "name": "Claude Desktop",
+                    "path": Path.home() / "Library/Application Support/Claude/claude_desktop_config.json",
+                    "format": "nested"  # {mcpServers: {...}}
+                },
+                "cursor": {
+                    "name": "Cursor",
+                    "path": Path.home() / ".cursor/mcp.json",
+                    "format": "flat"  # {...}
+                }
+            }
+            
+            # GET /api/desktop-mcp — list available desktop configs
+            if method == "GET" and path == "/api/desktop-mcp":
+                configs = []
+                for app_id, config in DESKTOP_CONFIGS.items():
+                    exists = config["path"].exists()
+                    server_count = 0
+                    if exists:
+                        try:
+                            data = json.loads(config["path"].read_text())
+                            if config["format"] == "nested":
+                                server_count = len(data.get("mcpServers", {}))
+                            else:
+                                server_count = len(data)
+                        except:
+                            pass
+                    configs.append({
+                        "id": app_id,
+                        "name": config["name"],
+                        "path": str(config["path"]),
+                        "exists": exists,
+                        "server_count": server_count
+                    })
+                return self._json({"configs": configs})
+            
+            # GET /api/desktop-mcp/<app> — get config for specific app
+            if method == "GET" and path.startswith("/api/desktop-mcp/"):
+                app_id = path.split("/api/desktop-mcp/", 1)[-1].strip("/")
+                
+                if app_id not in DESKTOP_CONFIGS:
+                    return self._json({"error": f"Unknown app: {app_id}"}, 404)
+                
+                config = DESKTOP_CONFIGS[app_id]
+                
+                if not config["path"].exists():
+                    return self._json({
+                        "error": f"Config file not found: {config['path']}",
+                        "exists": False,
+                        "app": config["name"]
+                    }, 404)
+                
+                try:
+                    data = json.loads(config["path"].read_text())
+                    
+                    # Extract mcpServers based on format
+                    if config["format"] == "nested":
+                        mcp_servers = data.get("mcpServers", {})
+                        full_config = data
+                    else:
+                        mcp_servers = data
+                        full_config = data
+                    
+                    return self._json({
+                        "app": config["name"],
+                        "app_id": app_id,
+                        "path": str(config["path"]),
+                        "format": config["format"],
+                        "mcpServers": mcp_servers,
+                        "fullConfig": full_config,
+                        "server_count": len(mcp_servers)
+                    })
+                except json.JSONDecodeError as e:
+                    return self._json({
+                        "error": f"Invalid JSON in config file: {str(e)}",
+                        "path": str(config["path"])
+                    }, 400)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+            
+            # POST /api/desktop-mcp/<app> — update config for specific app
+            if method == "POST" and path.startswith("/api/desktop-mcp/"):
+                app_id = path.split("/api/desktop-mcp/", 1)[-1].strip("/")
+                
+                if app_id not in DESKTOP_CONFIGS:
+                    return self._json({"error": f"Unknown app: {app_id}"}, 404)
+                
+                config = DESKTOP_CONFIGS[app_id]
+                body = self._read_body()
+                
+                # Get new mcpServers config
+                new_mcp_servers = body.get("mcpServers")
+                if new_mcp_servers is None:
+                    return self._json({"error": "Missing 'mcpServers' field"}, 400)
+                
+                if not isinstance(new_mcp_servers, dict):
+                    return self._json({"error": "'mcpServers' must be an object"}, 400)
+                
+                try:
+                    # Read existing config or create new
+                    if config["path"].exists():
+                        existing_data = json.loads(config["path"].read_text())
+                    else:
+                        config["path"].parent.mkdir(parents=True, exist_ok=True)
+                        existing_data = {}
+                    
+                    # Update based on format
+                    if config["format"] == "nested":
+                        # Claude Desktop format: preserve other fields, update mcpServers
+                        existing_data["mcpServers"] = new_mcp_servers
+                        new_data = existing_data
+                    else:
+                        # Cursor format: replace entire file
+                        new_data = new_mcp_servers
+                    
+                    # Write back
+                    config["path"].write_text(json.dumps(new_data, indent=2) + "\n")
+                    
+                    return self._json({
+                        "ok": True,
+                        "app": config["name"],
+                        "path": str(config["path"]),
+                        "server_count": len(new_mcp_servers),
+                        "message": f"Updated {config['name']} MCP config"
+                    })
+                except json.JSONDecodeError as e:
+                    return self._json({
+                        "error": f"Invalid JSON: {str(e)}"
+                    }, 400)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
 
         # ── Schedules API ─────────────────────────────────────────────────────
         if path == "/api/schedules" or path.startswith("/api/schedules/"):
