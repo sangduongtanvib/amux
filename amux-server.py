@@ -5803,83 +5803,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <!-- MCP view -->
 <div id="mcp-view" style="display:none;">
   <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">MCP Servers</span>
+    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">Desktop MCP Config Editor</span>
     <div style="flex:1;"></div>
-    <button class="btn" onclick="exportMcpJson()" style="font-size:0.78rem;padding:4px 10px;">📥 Export JSON</button>
-    <button class="btn" onclick="openImportMcpJson()" style="font-size:0.78rem;padding:4px 10px;background:var(--green);color:#000;">📤 Import JSON</button>
-    <button class="btn" onclick="openAddMcp()" style="font-size:0.78rem;padding:4px 10px;">+ Add Server</button>
+    <select id="mcp-app-selector" onchange="loadDesktopMCPForEdit()" style="padding:4px 10px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.78rem;">
+      <option value="">Select app...</option>
+      <option value="claude">Claude Desktop</option>
+      <option value="cursor">Cursor</option>
+    </select>
+    <button class="btn" onclick="loadDesktopMCPForEdit()" style="font-size:0.78rem;padding:4px 10px;">🔄 Reload</button>
+    <button class="btn" onclick="copyMCPEditorContent()" style="font-size:0.78rem;padding:4px 10px;">📋 Copy</button>
+    <button class="btn" onclick="saveDesktopMCPFromEditor()" style="font-size:0.78rem;padding:4px 10px;background:var(--accent);color:#000;">💾 Save</button>
   </div>
   <div style="margin:0 12px 8px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
-    Manage <strong style="color:var(--text);">Model Context Protocol</strong> servers for agent tools and capabilities. Configure once, then assign to specific sessions.
-    <span style="display:block;margin-top:6px;">Supports stdio (command-based) and HTTP servers. Generated mcp.json per session.</span>
+    Edit <strong style="color:var(--text);">Model Context Protocol</strong> configs directly from desktop app files.
+    <span style="display:block;margin-top:6px;">Changes are saved immediately to the source file (Claude Desktop or Cursor).</span>
   </div>
-  <div id="mcp-servers-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:12px;"></div>
-  
-  <!-- Add/Edit MCP Modal -->
-  <div id="add-mcp-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeAddMcp()" style="display:none;">
-    <div class="board-edit-box" style="max-width:620px;">
-      <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;" id="mcp-modal-title">Add MCP Server</div>
-      <input type="hidden" id="mcp-edit-id">
-      
-      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Name</label>
-      <input type="text" id="mcp-name" placeholder="e.g., claude-in-chrome" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;">
-      
-      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Server Type</label>
-      <select id="mcp-type" onchange="toggleMcpTypeFields()" style="width:calc(100% - 4px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;">
-        <option value="stdio">stdio (command-based)</option>
-        <option value="http">HTTP (URL-based)</option>
-      </select>
-      
-      <div id="mcp-stdio-fields" style="display:block;">
-        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Command</label>
-        <input type="text" id="mcp-command" placeholder="e.g., npx, python3, node" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;">
-        
-        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Arguments (one per line)</label>
-        <textarea id="mcp-args" placeholder="e.g., -y&#10;@anthropic-ai/claude-code-mcp-server-chrome" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:80px;"></textarea>
-      </div>
-      
-      <div id="mcp-http-fields" style="display:none;">
-        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">URL</label>
-        <input type="text" id="mcp-url" placeholder="e.g., https://mcp.mixpeek.com/mcp" style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;">
-        
-        <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Headers (JSON)</label>
-        <textarea id="mcp-headers" placeholder='{"Authorization": "Bearer ${API_KEY}"}' style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:80px;"></textarea>
-      </div>
-      
-      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Environment Variables (JSON, optional)</label>
-      <textarea id="mcp-env-vars" placeholder='{"API_KEY": "sk_..."}' style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:60px;"></textarea>
-      
-      <label style="display:flex;align-items:center;gap:6px;margin-bottom:16px;font-size:0.8rem;color:var(--dim);cursor:pointer;">
-        <input type="checkbox" id="mcp-enabled" checked style="width:16px;height:16px;">
-        <span>Enabled</span>
-      </label>
-      
-      <div style="display:flex;gap:8px;justify-content:flex-end;">
-        <button class="btn" onclick="closeAddMcp()" style="background:var(--dim);color:var(--bg);padding:6px 16px;">Cancel</button>
-        <button class="btn" onclick="saveMcp()" style="background:var(--accent);color:#000;padding:6px 16px;">Save</button>
-      </div>
-    </div>
+  <div style="margin:0 12px 8px;padding:6px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;font-size:0.72rem;color:var(--dim);font-family:monospace;display:flex;align-items:center;gap:8px;">
+    <span style="color:var(--text);">📁</span>
+    <span id="mcp-file-path" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No file selected</span>
   </div>
-
-  <!-- Import MCP JSON Modal -->
-  <div id="import-mcp-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeImportMcp()" style="display:none;">
-    <div class="board-edit-box" style="max-width:720px;">
-      <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;">Import MCP Servers from JSON</div>
-      
-      <label style="display:block;margin-bottom:4px;font-size:0.8rem;color:var(--dim);">Paste mcp.json content below:</label>
-      <textarea id="import-mcp-json" placeholder='{"mcpServers": {"server-name": {...}, ...}}' style="width:calc(100% - 20px);padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.82rem;font-family:monospace;min-height:280px;"></textarea>
-      
-      <label style="display:flex;align-items:center;gap:6px;margin-bottom:16px;font-size:0.8rem;color:var(--dim);cursor:pointer;">
-        <input type="checkbox" id="import-mcp-overwrite" style="width:16px;height:16px;">
-        <span>Overwrite existing servers with same name</span>
-      </label>
-      
-      <div id="import-mcp-result" style="display:none;padding:8px 10px;margin-bottom:12px;border-radius:5px;border:1px solid var(--border);background:var(--bg);font-size:0.8rem;font-family:monospace;white-space:pre-wrap;"></div>
-      
-      <div style="display:flex;gap:8px;justify-content:flex-end;">
-        <button class="btn" onclick="closeImportMcp()" style="background:var(--dim);color:var(--bg);padding:6px 16px;">Cancel</button>
-        <button class="btn" onclick="importMcpJson()" style="background:var(--accent);color:#000;padding:6px 16px;">Import</button>
-      </div>
+  <div style="margin:0 12px 12px;display:flex;flex-direction:column;flex:1;">
+    <textarea
+      id="mcp-editor"
+      placeholder="Select an app to edit its MCP configuration..."
+      style="width:100%;min-height:500px;padding:12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.8rem;font-family:'SF Mono','Fira Code',monospace;line-height:1.6;resize:vertical;box-sizing:border-box;"
+    ></textarea>
+    <div style="margin-top:8px;font-size:0.7rem;color:var(--dim);display:flex;align-items:center;gap:8px;">
+      <span id="mcp-editor-status">Ready</span>
+      <span style="flex:1;"></span>
+      <span id="mcp-editor-lines"></span>
     </div>
   </div>
 </div>
@@ -12156,321 +12108,155 @@ function applyPastedToken() {
   alert('✅ Token pasted! Click "Save" to store the credential.');
 }
 
-// ═══════ MCP MANAGEMENT ═══════
-let _mcpServers = [];
+// ═══════ DESKTOP MCP EDITOR ═══════
+let _mcpEditorData = null;
+let _mcpEditorApp = null;
 
-async function loadMcpServers() {
-  try {
-    const resp = await fetch(API + '/api/mcp');
-    _mcpServers = await resp.json();
-    renderMcpServers();
-  } catch(e) {
-    console.error('Failed to load MCP servers:', e);
-  }
-}
-
-function renderMcpServers() {
-  const container = document.getElementById('mcp-servers-list');
-  if (!_mcpServers || _mcpServers.length === 0) {
-    container.innerHTML = '<div class="empty-state" style="padding:48px 16px;text-align:center;"><div style="font-size:2rem;margin-bottom:12px;">🔌</div><div style="font-weight:600;margin-bottom:6px;color:var(--fg);">No MCP Servers</div><div style="color:var(--dim);font-size:0.85rem;">Click "+ Add Server" to configure your first MCP server</div></div>';
+async function loadDesktopMCPForEdit() {
+  const selector = document.getElementById('mcp-app-selector');
+  const appId = selector.value;
+  
+  if (!appId) {
+    clearMCPEditor();
     return;
   }
   
-  const html = _mcpServers.map(mcp => {
-    const typeLabel = mcp.type === 'stdio' ? '⚙️ stdio' : '🌐 HTTP';
-    const statusBadge = mcp.enabled ? '<span style="padding:2px 8px;border-radius:4px;background:var(--green);color:#000;font-size:0.7rem;font-weight:600;">Enabled</span>' : '<span style="padding:2px 8px;border-radius:4px;background:var(--dim);color:var(--bg);font-size:0.7rem;">Disabled</span>';
-    
-    let details = '';
-    if (mcp.type === 'stdio') {
-      const args = mcp.args && mcp.args.length > 0 ? mcp.args.join(' ') : '';
-      details = `<code style="font-size:0.72rem;color:var(--dim);">${mcp.command || ''} ${args}</code>`;
-    } else {
-      details = `<code style="font-size:0.72rem;color:var(--dim);">${mcp.url || ''}</code>`;
-    }
-    
-    return `
-      <div style="padding:14px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-          <span style="font-weight:600;font-size:0.9rem;flex:1;">${mcp.name}</span>
-          <span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;background:var(--accent);color:#000;">${typeLabel}</span>
-          ${statusBadge}
-        </div>
-        <div style="margin-bottom:8px;">${details}</div>
-        <div style="display:flex;gap:6px;align-items:center;">
-          <button class="btn" onclick="editMcp('${mcp.id}')" style="font-size:0.75rem;padding:4px 10px;">✏️ Edit</button>
-          <button class="btn" onclick="testMcp('${mcp.id}')" style="font-size:0.75rem;padding:4px 10px;">🔍 Test</button>
-          <button class="btn" onclick="deleteMcp('${mcp.id}')" style="font-size:0.75rem;padding:4px 10px;background:var(--red);color:#000;">🗑️ Delete</button>
-        </div>
-      </div>
-    `;
-  }).join('');
-  
-  container.innerHTML = html;
-}
-
-function openAddMcp() {
-  document.getElementById('mcp-modal-title').textContent = 'Add MCP Server';
-  document.getElementById('mcp-edit-id').value = '';
-  document.getElementById('mcp-name').value = '';
-  document.getElementById('mcp-type').value = 'stdio';
-  document.getElementById('mcp-command').value = '';
-  document.getElementById('mcp-args').value = '';
-  document.getElementById('mcp-url').value = '';
-  document.getElementById('mcp-headers').value = '';
-  document.getElementById('mcp-env-vars').value = '';
-  document.getElementById('mcp-enabled').checked = true;
-  toggleMcpTypeFields();
-  
-  const overlay = document.getElementById('add-mcp-overlay');
-  overlay.style.display = 'flex';
-  setTimeout(() => overlay.classList.add('active'), 10);
-  document.getElementById('mcp-name').focus();
-}
-
-function editMcp(mcpId) {
-  const mcp = _mcpServers.find(m => m.id === mcpId);
-  if (!mcp) return;
-  
-  document.getElementById('mcp-modal-title').textContent = 'Edit MCP Server';
-  document.getElementById('mcp-edit-id').value = mcp.id;
-  document.getElementById('mcp-name').value = mcp.name;
-  document.getElementById('mcp-type').value = mcp.type;
-  document.getElementById('mcp-command').value = mcp.command || '';
-  document.getElementById('mcp-args').value = (mcp.args || []).join('\n');
-  document.getElementById('mcp-url').value = mcp.url || '';
-  document.getElementById('mcp-headers').value = JSON.stringify(mcp.headers || {}, null, 2);
-  document.getElementById('mcp-env-vars').value = JSON.stringify(mcp.env_vars || {}, null, 2);
-  document.getElementById('mcp-enabled').checked = mcp.enabled;
-  toggleMcpTypeFields();
-  
-  const overlay = document.getElementById('add-mcp-overlay');
-  overlay.style.display = 'flex';
-  setTimeout(() => overlay.classList.add('active'), 10);
-  document.getElementById('mcp-name').focus();
-}
-
-function closeAddMcp() {
-  const overlay = document.getElementById('add-mcp-overlay');
-  overlay.classList.remove('active');
-  setTimeout(() => overlay.style.display = 'none', 250);
-}
-
-function toggleMcpTypeFields() {
-  const type = document.getElementById('mcp-type').value;
-  document.getElementById('mcp-stdio-fields').style.display = type === 'stdio' ? 'block' : 'none';
-  document.getElementById('mcp-http-fields').style.display = type === 'http' ? 'block' : 'none';
-}
-
-async function saveMcp() {
-  const editId = document.getElementById('mcp-edit-id').value;
-  const name = document.getElementById('mcp-name').value.trim();
-  const type = document.getElementById('mcp-type').value;
-  const enabled = document.getElementById('mcp-enabled').checked;
-  
-  if (!name) {
-    alert('⚠️ Please provide a name');
-    return;
-  }
-  
-  const payload = { name, type, enabled };
-  
-  if (type === 'stdio') {
-    const command = document.getElementById('mcp-command').value.trim();
-    const argsText = document.getElementById('mcp-args').value.trim();
-    if (!command) {
-      alert('⚠️ Please provide a command');
-      return;
-    }
-    payload.command = command;
-    payload.args = argsText ? argsText.split('\n').map(s => s.trim()).filter(Boolean) : [];
-  } else if (type === 'http') {
-    const url = document.getElementById('mcp-url').value.trim();
-    if (!url) {
-      alert('⚠️ Please provide a URL');
-      return;
-    }
-    payload.url = url;
-    const headersText = document.getElementById('mcp-headers').value.trim();
-    if (headersText) {
-      try {
-        payload.headers = JSON.parse(headersText);
-      } catch(e) {
-        alert('⚠️ Invalid JSON for headers');
-        return;
-      }
-    }
-  }
-  
-  const envVarsText = document.getElementById('mcp-env-vars').value.trim();
-  if (envVarsText) {
-    try {
-      payload.env_vars = JSON.parse(envVarsText);
-    } catch(e) {
-      alert('⚠️ Invalid JSON for environment variables');
-      return;
-    }
-  }
+  const statusEl = document.getElementById('mcp-editor-status');
+  statusEl.textContent = 'Loading...';
+  statusEl.style.color = 'var(--dim)';
   
   try {
-    let url, method;
-    if (editId) {
-      url = API + `/api/mcp/${editId}`;
-      method = 'PATCH';
-    } else {
-      url = API + '/api/mcp';
-      method = 'POST';
-    }
-    
-    const resp = await fetch(url, {
-      method,
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    
-    if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.error || 'Failed to save MCP config');
-    }
-    
-    closeAddMcp();
-    loadMcpServers();
-  } catch(e) {
-    alert('❌ Error saving MCP: ' + e.message);
-  }
-}
-
-async function deleteMcp(mcpId) {
-  const mcp = _mcpServers.find(m => m.id === mcpId);
-  if (!mcp || !confirm(`Delete MCP server "${mcp.name}"?`)) return;
-  
-  try {
-    await fetch(API + `/api/mcp/${mcpId}`, {method: 'DELETE'});
-    loadMcpServers();
-  } catch(e) {
-    alert('❌ Error deleting MCP: ' + e.message);
-  }
-}
-
-async function testMcp(mcpId) {
-  try {
-    const resp = await fetch(API + `/api/mcp/${mcpId}/test`, {method: 'POST'});
-    const result = await resp.json();
-    if (result.ok) {
-      alert('✅ MCP config validation passed!\n\n' + (result.message || 'Ready to use'));
-    } else {
-      alert('❌ MCP validation failed:\n\n' + (result.error || 'Unknown error'));
-    }
-  } catch(e) {
-    alert('❌ Test failed: ' + e.message);
-  }
-}
-
-async function exportMcpJson() {
-  try {
-    const resp = await fetch(API + '/api/mcp/export');
-    if (!resp.ok) throw new Error('Export failed');
+    const resp = await fetch(API + '/api/desktop-mcp/' + appId);
     const data = await resp.json();
-    const json = JSON.stringify(data, null, 2);
     
-    // Create download link
-    const blob = new Blob([json], {type: 'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'mcp.json';
-    a.click();
-    URL.revokeObjectURL(url);
+    if (data.error) {
+      throw new Error(data.error);
+    }
     
-    // Also copy to clipboard
-    await navigator.clipboard.writeText(json);
-    alert('✅ MCP configuration exported!\n\nFile downloaded as mcp.json\nAlso copied to clipboard');
+    _mcpEditorData = data;
+    _mcpEditorApp = appId;
+    
+    // Display file path
+    document.getElementById('mcp-file-path').textContent = data.path;
+    
+    // Format and display mcpServers JSON
+    const mcpServers = data.mcpServers || {};
+    const jsonStr = JSON.stringify(mcpServers, null, 2);
+    document.getElementById('mcp-editor').value = jsonStr;
+    
+    updateMCPEditorStats();
+    statusEl.textContent = `Loaded ${data.app}`;
+    statusEl.style.color = 'var(--green)';
+    
   } catch(e) {
-    alert('❌ Export failed: ' + e.message);
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.style.color = 'var(--red)';
+    clearMCPEditor();
   }
 }
 
-function openImportMcpJson() {
-  document.getElementById('import-mcp-json').value = '';
-  document.getElementById('import-mcp-overwrite').checked = false;
-  document.getElementById('import-mcp-result').style.display = 'none';
-  document.getElementById('import-mcp-result').textContent = '';
+function clearMCPEditor() {
+  document.getElementById('mcp-editor').value = '';
+  document.getElementById('mcp-file-path').textContent = 'No file selected';
+  document.getElementById('mcp-editor-lines').textContent = '';
+  _mcpEditorData = null;
+  _mcpEditorApp = null;
+}
+
+function updateMCPEditorStats() {
+  const editor = document.getElementById('mcp-editor');
+  const lines = editor.value.split('\n').length;
+  document.getElementById('mcp-editor-lines').textContent = `${lines} lines`;
+}
+
+async function saveDesktopMCPFromEditor() {
+  if (!_mcpEditorApp) {
+    alert('⚠️ No app selected');
+    return;
+  }
   
-  const overlay = document.getElementById('import-mcp-overlay');
-  overlay.style.display = 'flex';
-  setTimeout(() => overlay.classList.add('active'), 10);
-  document.getElementById('import-mcp-json').focus();
-}
-
-function closeImportMcp() {
-  const overlay = document.getElementById('import-mcp-overlay');
-  overlay.classList.remove('active');
-  setTimeout(() => overlay.style.display = 'none', 250);
-}
-
-async function importMcpJson() {
-  const jsonText = document.getElementById('import-mcp-json').value.trim();
-  const overwrite = document.getElementById('import-mcp-overwrite').checked;
-  const resultDiv = document.getElementById('import-mcp-result');
+  const editor = document.getElementById('mcp-editor');
+  const jsonText = editor.value.trim();
   
   if (!jsonText) {
-    alert('⚠️ Please paste JSON content');
+    alert('⚠️ Editor is empty');
     return;
   }
   
   // Validate JSON
-  let jsonData;
+  let mcpServers;
   try {
-    jsonData = JSON.parse(jsonText);
+    mcpServers = JSON.parse(jsonText);
   } catch(e) {
-    alert('❌ Invalid JSON: ' + e.message);
+    alert('❌ Invalid JSON:\n\n' + e.message);
     return;
   }
   
+  const statusEl = document.getElementById('mcp-editor-status');
+  statusEl.textContent = 'Saving...';
+  statusEl.style.color = 'var(--accent)';
+  
   try {
-    const resp = await fetch(API + '/api/mcp/import', {
+    const resp = await fetch(API + '/api/desktop-mcp/' + _mcpEditorApp, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({json: jsonData, overwrite})
+      body: JSON.stringify({mcpServers})
     });
     
     if (!resp.ok) {
       const err = await resp.json();
-      throw new Error(err.error || 'Import failed');
+      throw new Error(err.error || 'Save failed');
     }
     
     const result = await resp.json();
+    statusEl.textContent = '✅ Saved successfully';
+    statusEl.style.color = 'var(--green)';
     
-    // Show result
-    let resultText = `✅ Import complete:\n\n`;
-    resultText += `Imported: ${result.imported}\n`;
-    resultText += `Skipped: ${result.skipped}\n`;
-    if (result.errors && result.errors.length > 0) {
-      resultText += `\nErrors:\n`;
-      result.errors.forEach(err => {
-        resultText += `  • ${err}\n`;
-      });
-    }
+    // Reload to confirm
+    setTimeout(() => loadDesktopMCPForEdit(), 500);
     
-    resultDiv.textContent = resultText;
-    resultDiv.style.display = 'block';
-    resultDiv.style.borderColor = 'var(--accent)';
-    resultDiv.style.color = 'var(--text)';
-    
-    // Reload MCP servers list
-    loadMcpServers();
-    
-    // Clear textarea after successful import
-    if (result.imported > 0) {
-      document.getElementById('import-mcp-json').value = '';
-    }
   } catch(e) {
-    const resultDiv = document.getElementById('import-mcp-result');
-    resultDiv.textContent = '❌ Error: ' + e.message;
-    resultDiv.style.display = 'block';
-    resultDiv.style.borderColor = '#f44';
-    resultDiv.style.color = '#f44';
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.style.color = 'var(--red)';
+    alert('❌ Save failed:\n\n' + e.message);
   }
 }
+
+async function copyMCPEditorContent() {
+  const editor = document.getElementById('mcp-editor');
+  const text = editor.value;
+  
+  if (!text) {
+    alert('⚠️ Editor is empty');
+    return;
+  }
+  
+  try {
+    await navigator.clipboard.writeText(text);
+    const statusEl = document.getElementById('mcp-editor-status');
+    statusEl.textContent = '📋 Copied to clipboard';
+    statusEl.style.color = 'var(--accent)';
+    setTimeout(() => {
+      if (_mcpEditorData) {
+        statusEl.textContent = `Loaded ${_mcpEditorData.app}`;
+        statusEl.style.color = 'var(--green)';
+      } else {
+        statusEl.textContent = 'Ready';
+        statusEl.style.color = 'var(--dim)';
+      }
+    }, 2000);
+  } catch(e) {
+    alert('❌ Copy failed: ' + e.message);
+  }
+}
+
+// Update line count on typing
+document.addEventListener('DOMContentLoaded', function() {
+  const editor = document.getElementById('mcp-editor');
+  if (editor) {
+    editor.addEventListener('input', updateMCPEditorStats);
+  }
+});
 
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
@@ -12564,7 +12350,7 @@ function switchView(view) {
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
   if (view === 'credentials') loadCredentials();
-  if (view === 'mcp') loadMcpServers();
+  if (view === 'mcp') { /* Desktop MCP editor - no auto-load */ }
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
