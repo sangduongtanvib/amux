@@ -5493,6 +5493,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="settings-section-label" style="margin-bottom:0;">Desktop MCP Configs</div>
+            <button class="btn" style="font-size:0.6rem;padding:1px 8px;" onclick="refreshDesktopMCP()">&#x21bb; Refresh</button>
+          </div>
+          <div style="font-size:0.68rem;color:var(--dim);margin:4px 0 8px 0;">Direct edit of Claude & Cursor MCP configs</div>
+          <div id="desktop-mcp-list" style="margin-top:6px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section">
           <div class="settings-section-label">Automation</div>
           <div class="settings-row" style="justify-content:space-between;align-items:center;">
             <span style="font-size:0.85rem;">Auto-compact</span>
@@ -15125,6 +15134,8 @@ function toggleSettings() {
     }
     // Render servers
     renderSettingsServerList();
+    // Load desktop MCP configs
+    loadDesktopMCP();
     // Close add form
     document.getElementById('settings-add-server').style.display = 'none';
   }
@@ -15214,6 +15225,135 @@ function saveSettingsNewServer() {
   document.getElementById('settings-add-server').style.display = 'none';
   renderSettingsServerList();
   showToast('Server saved');
+}
+
+// ── Desktop MCP Configs ────────────────────────────────────────────────────────
+async function loadDesktopMCP() {
+  try {
+    const r = await fetch('/api/desktop-mcp');
+    const data = await r.json();
+    renderDesktopMCPList(data.configs || []);
+  } catch(e) {
+    console.error('Failed to load desktop MCP configs:', e);
+  }
+}
+
+function renderDesktopMCPList(configs) {
+  const el = document.getElementById('desktop-mcp-list');
+  if (!el) return;
+  
+  let html = '';
+  configs.forEach(cfg => {
+    const statusIcon = cfg.exists ? '✓' : '✗';
+    const statusColor = cfg.exists ? 'var(--accent)' : 'var(--dim)';
+    html += '<div class="settings-server-item" style="cursor:pointer;" onclick="openDesktopMCPEditor(\'' + cfg.id + '\')">';
+    html += '<div style="min-width:0;flex:1;">';
+    html += '<div class="settings-server-name">' + esc(cfg.name) + '</div>';
+    html += '<div class="settings-server-url" style="font-size:0.68rem;">' + cfg.server_count + ' servers</div>';
+    html += '</div>';
+    html += '<span style="color:' + statusColor + ';font-size:0.8rem;margin-left:8px;">' + statusIcon + '</span>';
+    html += '</div>';
+  });
+  
+  if (!configs.length) {
+    html = '<div style="color:var(--dim);font-size:0.68rem;text-align:center;padding:4px 0;">No desktop apps found</div>';
+  }
+  
+  el.innerHTML = html;
+}
+
+async function refreshDesktopMCP() {
+  await loadDesktopMCP();
+  showToast('Refreshed desktop MCP configs');
+}
+
+async function openDesktopMCPEditor(appId) {
+  try {
+    const r = await fetch('/api/desktop-mcp/' + appId);
+    const data = await r.json();
+    
+    if (data.error) {
+      showToast('Error: ' + data.error);
+      return;
+    }
+    
+    // Show modal with MCP servers
+    showDesktopMCPModal(data);
+  } catch(e) {
+    showToast('Failed to load config: ' + e.message);
+  }
+}
+
+function showDesktopMCPModal(data) {
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+  
+  const content = document.createElement('div');
+  content.style.cssText = 'background:var(--bg);border-radius:8px;padding:20px;max-width:600px;width:90%;max-height:80vh;overflow:auto;box-shadow:0 4px 20px rgba(0,0,0,0.3);';
+  
+  let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">';
+  html += '<h3 style="margin:0;font-size:1.1rem;">' + esc(data.app) + ' MCP Config</h3>';
+  html += '<button onclick="this.closest(\'.modal\').remove()" style="background:none;border:none;color:var(--dim);font-size:1.5rem;cursor:pointer;padding:0;line-height:1;">&times;</button>';
+  html += '</div>';
+  
+  html += '<div style="font-size:0.75rem;color:var(--dim);margin-bottom:12px;">' + esc(data.path) + '</div>';
+  
+  const mcpServers = data.mcpServers || {};
+  const serverCount = Object.keys(mcpServers).length;
+  
+  html += '<div style="font-size:0.85rem;margin-bottom:12px;">Servers: <strong>' + serverCount + '</strong></div>';
+  
+  if (serverCount > 0) {
+    html += '<div style="max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:12px;">';
+    for (const [name, config] of Object.entries(mcpServers)) {
+      const type = config.type || 'stdio';
+      const cmd = config.command || config.url || '';
+      html += '<div style="padding:6px 0;border-bottom:1px solid var(--border-light);">';
+      html += '<div style="font-weight:600;font-size:0.85rem;">' + esc(name) + '</div>';
+      html += '<div style="font-size:0.72rem;color:var(--dim);">';
+      html += '<span style="background:var(--border);padding:1px 4px;border-radius:2px;margin-right:6px;">' + type + '</span>';
+      html += esc(cmd.substring(0, 50)) + (cmd.length > 50 ? '...' : '');
+      html += '</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div style="color:var(--dim);font-size:0.8rem;text-align:center;padding:20px;border:1px dashed var(--border);border-radius:4px;margin-bottom:12px;">No MCP servers configured</div>';
+  }
+  
+  html += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
+  html += '<button class="btn" onclick="copyDesktopMCPToClipboard(\'' + data.app_id + '\')">📋 Copy JSON</button>';
+  html += '<button class="btn" onclick="openDesktopMCPInEditor(\'' + esc(data.path) + '\')">✏️ Edit File</button>';
+  html += '<button class="btn" style="background:var(--accent);color:#000;" onclick="this.closest(\'.modal\').remove()">Close</button>';
+  html += '</div>';
+  
+  content.innerHTML = html;
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+  
+  // Close on outside click
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+}
+
+async function copyDesktopMCPToClipboard(appId) {
+  try {
+    const r = await fetch('/api/desktop-mcp/' + appId);
+    const data = await r.json();
+    const jsonStr = JSON.stringify(data.mcpServers, null, 2);
+    await navigator.clipboard.writeText(jsonStr);
+    showToast('✅ Copied to clipboard');
+  } catch(e) {
+    showToast('Failed to copy: ' + e.message);
+  }
+}
+
+function openDesktopMCPInEditor(path) {
+  showToast('Open: ' + path);
+  // User needs to manually open the file in their editor
+  // We could potentially use file:// protocol but security restrictions apply
 }
 
 // Close settings on outside click
