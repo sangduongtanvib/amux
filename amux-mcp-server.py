@@ -421,8 +421,8 @@ MCP_TOOLS = {
                 },
                 "tool": {
                     "type": "string",
-                    "description": "AI tool to use: 'claude_code' or 'cursor'",
-                    "enum": ["claude_code", "cursor"]
+                    "description": "AI tool to use: 'claude_code', 'cursor', or 'gemini'",
+                    "enum": ["claude_code", "cursor", "gemini"]
                 },
                 "desc": {
                     "type": "string",
