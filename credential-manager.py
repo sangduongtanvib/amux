@@ -526,6 +526,15 @@ class CredentialManager:
             if "cursor" not in creds:
                 creds["cursor"] = {"accounts": {}, "load_balancer": {"usage_count": {}}}
             
+            if "accounts" not in creds["cursor"]:
+                creds["cursor"]["accounts"] = {}
+            
+            if "load_balancer" not in creds["cursor"]:
+                creds["cursor"]["load_balancer"] = {"usage_count": {}}
+            
+            if "usage_count" not in creds["cursor"]["load_balancer"]:
+                creds["cursor"]["load_balancer"]["usage_count"] = {}
+            
             # Store account metadata
             creds["cursor"]["accounts"][account_id] = {
                 "id": account_id,
