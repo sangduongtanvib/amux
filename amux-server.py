@@ -3213,6 +3213,17 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             except Exception as e:
                 print(f"[credential] Warning: Failed to inject credentials: {e}")
         
+        # Cursor: Prepare isolated HOME for multi-account support
+        if tool_name == "cursor" and _CRED_MANAGER:
+            try:
+                cursor_env = _CRED_MANAGER.prepare_cursor_session(name)
+                for env_key, env_val in cursor_env.items():
+                    tmux_cmd.extend(["-e", f"{env_key}={env_val}"])
+                print(f"[cursor-isolation] Isolated HOME for account {cursor_env.get('AMUX_CURSOR_ACCOUNT')}")
+            except Exception as e:
+                print(f"[cursor-isolation] Warning: Failed to prepare isolated session: {e}")
+                # Non-fatal - session will use global Cursor config
+        
         # Add the shell command
         tmux_cmd.append(shell_rc + cmd)
         
@@ -3249,6 +3260,14 @@ def stop_session(name: str) -> tuple[bool, str]:
             ["tmux", "kill-session", "-t", tmux_name(name)],
             check=True, capture_output=True, timeout=5,
         )
+        
+        # Clean up Cursor isolated home directory if used
+        if _CRED_MANAGER:
+            try:
+                _CRED_MANAGER.cleanup_cursor_session(name)
+            except Exception as e:
+                print(f"[cursor-isolation] Warning: Cleanup failed: {e}")
+        
         return True, "stopped"
     except subprocess.CalledProcessError as e:
         return False, e.stderr.decode(errors="replace")
