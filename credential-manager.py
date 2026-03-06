@@ -478,6 +478,82 @@ class CredentialManager:
         else:
             print(f"ℹ️  No environment variables found for {tool}")
     
+    def import_cursor_config(self, account_label: Optional[str] = None) -> bool:
+        """
+        Import Cursor CLI config from ~/.cursor/cli-config.json
+        
+        Args:
+            account_label: Optional human-readable label (e.g., "work", "personal").
+                         If None, uses email from config.
+        
+        Returns:
+            True if import successful, False otherwise
+        """
+        cursor_config_file = Path.home() / ".cursor" / "cli-config.json"
+        if not cursor_config_file.exists():
+            print("❌ No Cursor config found at ~/.cursor/cli-config.json")
+            print("   Please login to Cursor first by running: cursor --version")
+            return False
+        
+        try:
+            config_data = json.loads(cursor_config_file.read_text())
+            auth_info = config_data.get("authInfo", {})
+            
+            if not auth_info:
+                print("❌ Cursor config file has no authInfo")
+                return False
+            
+            email = auth_info.get("email", "")
+            auth_id = auth_info.get("authId", "")
+            
+            if not email and not auth_id:
+                print("❌ Cursor config missing email and authId")
+                return False
+            
+            # Generate account ID (use email for readability)
+            account_id = account_label or email.split("@")[0] if email else auth_id[:8]
+            
+            # Create cursor credentials directory
+            cursor_creds_dir = self.CREDS_DIR / "cursor"
+            cursor_creds_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy config file with account ID as filename
+            dest_config = cursor_creds_dir / f"{account_id}.json"
+            shutil.copy2(cursor_config_file, dest_config)
+            
+            # Add account to main credentials database
+            creds = self._load_credentials()
+            if "cursor" not in creds:
+                creds["cursor"] = {"accounts": {}, "load_balancer": {"usage_count": {}}}
+            
+            # Store account metadata
+            creds["cursor"]["accounts"][account_id] = {
+                "id": account_id,
+                "label": account_label or email,
+                "email": email,
+                "team_id": auth_info.get("teamId", ""),
+                "user_id": auth_info.get("userId", ""),
+                "auth_id": auth_id,
+                "config_file": str(dest_config),
+                "imported_at": int(time.time())
+            }
+            
+            # Initialize load balancer counter
+            if account_id not in creds["cursor"]["load_balancer"]["usage_count"]:
+                creds["cursor"]["load_balancer"]["usage_count"][account_id] = 0
+            
+            self._save_credentials(creds)
+            
+            print(f"✅ Imported Cursor account: {email} (ID: {account_id})")
+            print(f"   Config: {dest_config}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to import Cursor config: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
     def print_status(self):
         """Print credential status for all tools."""
         print("\n" + "="*70)
@@ -611,11 +687,13 @@ def main():
         print("  python3 credential-manager.py get <tool> <type>")
         print("  python3 credential-manager.py delete <tool> <type>")
         print("  python3 credential-manager.py import <tool>")
+        print("  python3 credential-manager.py import-cursor [label]")
         print("  python3 credential-manager.py detect")
         print("\nExamples:")
         print("  python3 credential-manager.py set claude_code anthropic_api_key sk-xxx")
         print("  python3 credential-manager.py set gemini google_api_key AIza...")
         print("  python3 credential-manager.py import aider")
+        print("  python3 credential-manager.py import-cursor work")
         return
     
     command = sys.argv[1]
@@ -654,6 +732,10 @@ def main():
             return
         tool = sys.argv[2]
         manager.import_from_env(tool)
+    
+    elif command == "import-cursor":
+        label = sys.argv[2] if len(sys.argv) > 2 else None
+        manager.import_cursor_config(label)
     
     elif command == "detect":
         detected = manager.detect_existing_credentials()
