@@ -3314,6 +3314,19 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             ["tmux", "rename-window", "-t", tmux_sess, name],
             capture_output=True, timeout=5,
         )
+        
+        # Gemini CLI: Auto-select authentication method on first run
+        if tool_name == "gemini":
+            try:
+                time.sleep(2)  # Wait for Gemini welcome screen
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", tmux_sess, "Enter"],
+                    capture_output=True, timeout=5,
+                )
+                print(f"[gemini] Auto-selected API key authentication")
+            except Exception as e:
+                print(f"[gemini] Warning: Failed to auto-select auth: {e}")
+        
         meta["last_started"] = int(time.time())
         meta["start_count"] = meta.get("start_count", 0) + 1
         _save_meta(name, meta)
