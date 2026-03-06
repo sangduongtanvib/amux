@@ -5888,6 +5888,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <option value="">Select app...</option>
       <option value="claude">Claude Desktop</option>
       <option value="cursor">Cursor</option>
+      <option value="gemini">Gemini CLI</option>
     </select>
     <button class="btn" onclick="formatMCPEditor()" style="font-size:0.78rem;padding:4px 10px;" title="Format JSON (pretty-print)">✨ Format</button>
     <button class="btn" onclick="minifyMCPEditor()" style="font-size:0.78rem;padding:4px 10px;" title="Minify JSON (compact)">📦 Minify</button>
@@ -6236,6 +6237,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <select id="create-tool" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:0.9rem;">
         <option value="claude_code" selected>Claude Code (claude)</option>
         <option value="cursor">Cursor CLI (agent)</option>
+        <option value="gemini">Google Gemini (gemini)</option>
       </select>
       <div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">
         Select which AI coding tool this session will use
@@ -17819,6 +17821,11 @@ class CCHandler(BaseHTTPRequestHandler):
                 "cursor": {
                     "name": "Cursor",
                     "path": Path.home() / ".cursor/mcp.json",
+                    "format": "flat"  # {...}
+                },
+                "gemini": {
+                    "name": "Gemini CLI",
+                    "path": Path.home() / ".gemini-cli/mcp_settings.json",
                     "format": "flat"  # {...}
                 }
             }
