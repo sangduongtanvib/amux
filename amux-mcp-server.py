@@ -82,11 +82,15 @@ def tool_amux_list_sessions(args: Dict) -> Dict:
 
 
 def tool_amux_create_session(args: Dict) -> Dict:
-    """Create a new AMUX session."""
+    """Create a new AMUX session with optional configuration."""
     name = args.get("name")
     dir_path = args.get("dir", "")
     tool = args.get("tool", "claude_code")
     desc = args.get("desc", "")
+    yolo = args.get("yolo", False)
+    model = args.get("model", "")
+    auto_continue = args.get("auto_continue", False)
+    flags = args.get("flags", "")
     
     if not name:
         raise ValueError("Session name is required")
@@ -98,6 +102,16 @@ def tool_amux_create_session(args: Dict) -> Dict:
         "desc": desc,
         "creator": "mcp-orchestrator"
     }
+    
+    # Add optional configuration parameters
+    if yolo:
+        data["yolo"] = True
+    if model:
+        data["model"] = model
+    if auto_continue:
+        data["auto_continue"] = True
+    if flags:
+        data["flags"] = flags
     
     result = amux_api_call("/api/sessions", method="POST", data=data)
     return {
@@ -325,7 +339,7 @@ MCP_TOOLS = {
         "handler": tool_amux_list_sessions
     },
     "amux_create_session": {
-        "description": "Create a new AMUX session for an AI coding agent",
+        "description": "Create a new AMUX session for an AI coding agent with optional configuration",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -345,6 +359,22 @@ MCP_TOOLS = {
                 "desc": {
                     "type": "string",
                     "description": "Optional description of the session"
+                },
+                "yolo": {
+                    "type": "boolean",
+                    "description": "Enable YOLO mode (--dangerously-skip-permissions): bypass all permission checks. Recommended only for sandboxes."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model to use (e.g., 'sonnet', 'opus', 'claude-sonnet-4-5-20250929')"
+                },
+                "auto_continue": {
+                    "type": "boolean",
+                    "description": "Enable auto-continue mode: automatically continue when agent completes a turn"
+                },
+                "flags": {
+                    "type": "string",
+                    "description": "Additional custom CLI flags to pass to the agent (e.g., '--verbose --debug')"
                 }
             },
             "required": ["name"]

@@ -18216,7 +18216,30 @@ class CCHandler(BaseHTTPRequestHandler):
             creator = body.get("creator", "").strip()
             if creator:
                 cfg["CC_CREATOR"] = creator
-            cfg["CC_FLAGS"] = ""
+            
+            # Build CC_FLAGS from various options
+            flags_parts = []
+            
+            # YOLO mode (--dangerously-skip-permissions)
+            if body.get("yolo"):
+                flags_parts.append("--dangerously-skip-permissions")
+            
+            # Model selection
+            model = body.get("model", "").strip()
+            if model:
+                flags_parts.append(f"--model {model}")
+            
+            # Custom flags (raw string)
+            custom_flags = body.get("flags", "").strip()
+            if custom_flags:
+                flags_parts.append(custom_flags)
+            
+            cfg["CC_FLAGS"] = " ".join(flags_parts)
+            
+            # Auto-continue mode
+            if body.get("auto_continue"):
+                cfg["CC_AUTO_CONTINUE"] = "1"
+            
             _write_env(env_file, cfg)
             _save_meta(name, {
                 "created_at": int(time.time()),
