@@ -537,14 +537,20 @@ class CredentialManager:
             
             # Store account metadata
             creds["cursor"]["accounts"][account_id] = {
-                "id": account_id,
-                "label": account_label or email,
-                "email": email,
-                "team_id": auth_info.get("teamId", ""),
-                "user_id": auth_info.get("userId", ""),
-                "auth_id": auth_id,
-                "config_file": str(dest_config),
-                "imported_at": int(time.time())
+                "credentials": {
+                    "email": email,
+                    "auth_id": auth_id,
+                    "team_id": auth_info.get("teamId", ""),
+                    "user_id": auth_info.get("userId", ""),
+                },
+                "metadata": {
+                    "id": account_id,
+                    "label": account_label or email,
+                    "config_file": str(dest_config),
+                    "imported_at": int(time.time()),
+                    "usage_count": 0,
+                    "enabled": True
+                }
             }
             
             # Initialize load balancer counter
