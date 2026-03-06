@@ -48,7 +48,7 @@ Create a new AMUX session.
 {
   "name": "backend-api",
   "dir": "/path/to/project",
-  "tool": "claude_code",  // or "cursor"
+  "tool": "claude_code",  // "claude_code", "cursor", or "gemini"
   "desc": "Backend API development"
 }
 ```

@@ -62,7 +62,7 @@ source ~/.zshrc
 3. Điền:
    - Name: `my-project`
    - Directory: `/path/to/project`
-   - Tool: `claude_code` hoặc `cursor`
+   - Tool: `claude_code`, `cursor`, hoặc `gemini`
 4. Click **"Create"**
 
 **Qua API:**
