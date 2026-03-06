@@ -324,6 +324,74 @@ def tool_amux_update_task(args: Dict) -> Dict:
     }
 
 
+def tool_amux_delete_inactive_sessions(args: Dict) -> Dict:
+    """Delete all inactive (stopped) sessions, with optional filtering.
+    
+    This is useful for cleaning up sessions that are no longer running.
+    Archived sessions can be optionally excluded or included.
+    """
+    # Get all sessions
+    sessions = amux_api_call("/api/sessions")
+    
+    # Filter options
+    include_archived = args.get("include_archived", False)
+    exclude_names = args.get("exclude_names", [])
+    dry_run = args.get("dry_run", False)
+    
+    # Find inactive sessions
+    inactive_sessions = []
+    for s in sessions:
+        name = s.get("name", "")
+        is_running = s.get("running", False)
+        is_archived = s.get("status", "") == "archived"
+        
+        # Skip running sessions
+        if is_running:
+            continue
+            
+        # Skip archived if not included
+        if is_archived and not include_archived:
+            continue
+            
+        # Skip excluded names
+        if name in exclude_names:
+            continue
+            
+        inactive_sessions.append(name)
+    
+    if dry_run:
+        return {
+            "dry_run": True,
+            "found": len(inactive_sessions),
+            "sessions": inactive_sessions,
+            "message": f"Would delete {len(inactive_sessions)} inactive session(s)"
+        }
+    
+    # Delete each inactive session
+    deleted = []
+    errors = []
+    
+    for name in inactive_sessions:
+        try:
+            result = amux_api_call(f"/api/sessions/{name}/delete", method="POST")
+            if result.get("ok"):
+                deleted.append(name)
+            else:
+                errors.append({"name": name, "error": result.get("message", "unknown error")})
+        except Exception as e:
+            errors.append({"name": name, "error": str(e)})
+    
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "errors": errors,
+        "error_count": len(errors),
+        "message": f"Deleted {len(deleted)} inactive session(s)" + 
+                   (f", {len(errors)} failed" if errors else "")
+    }
+
+
 # ═══════════════════════════════════════════
 # MCP PROTOCOL IMPLEMENTATION
 # ═══════════════════════════════════════════
@@ -547,6 +615,33 @@ MCP_TOOLS = {
             "required": ["task_id"]
         },
         "handler": tool_amux_update_task
+    },
+    "amux_delete_inactive_sessions": {
+        "description": "Delete all inactive (stopped) sessions. Useful for cleanup. Supports dry-run mode and filtering.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, only return list of sessions that would be deleted without actually deleting them (default: false)",
+                    "default": False
+                },
+                "include_archived": {
+                    "type": "boolean",
+                    "description": "If true, also delete archived sessions (default: false)",
+                    "default": False
+                },
+                "exclude_names": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of session names to exclude from deletion (optional)"
+                }
+            },
+            "required": []
+        },
+        "handler": tool_amux_delete_inactive_sessions
     },
 }
 
