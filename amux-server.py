@@ -16208,8 +16208,9 @@ class CCHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length))
 
     def _route(self, method: str):
+        from urllib.parse import unquote
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        path = unquote(parsed.path).rstrip("/") or "/"
         qs = parse_qs(parsed.query)
         self._resp_status = 200
         t0 = time.monotonic()
