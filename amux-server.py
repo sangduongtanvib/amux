@@ -71,6 +71,7 @@ UPLOAD_ALLOWED_EXTS = {
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
 CURSOR_HOME = Path.home() / ".cursor"
+GEMINI_HOME = Path.home() / ".gemini-cli"
 
 # ═══════════════════════════════════════════
 # AI TOOL CONFIGURATION SYSTEM
@@ -205,10 +206,69 @@ class CursorTool(AITool):
         return True  # Cursor has session management
 
 
+class GeminiTool(AITool):
+    """Google Gemini CLI integration."""
+    
+    def __init__(self):
+        super().__init__("gemini")
+    
+    def get_command(self, flags: str, session_flag: str, default_flags: str, extra_flags: str) -> str:
+        cmd = "gemini"
+        
+        # Gemini uses --auth-type for authentication
+        # If API key is set via env var, use gemini-api-key auth type
+        if "--auth-type" not in (flags or ""):
+            cmd += " --auth-type gemini-api-key"
+        
+        if default_flags:
+            cmd += f" {default_flags}"
+        if flags:
+            cmd += f" {flags}"
+        if session_flag:
+            # Gemini doesn't have explicit session ID support yet
+            # Future: may support session management
+            pass
+        if extra_flags:
+            cmd += f" {extra_flags}"
+        
+        # Default model if not specified
+        if "--model" not in cmd and "-m" not in cmd:
+            cmd += " --model gemini-2.0-flash-exp"
+        
+        return cmd
+    
+    def detect_status(self, raw_output: str) -> str:
+        """Detect Gemini CLI status from tmux output."""
+        if not raw_output:
+            return "idle"
+        
+        last_lines = raw_output.split("\n")[-15:]
+        last_output = "\n".join(last_lines)
+        
+        # Gemini-specific patterns (similar to Claude)
+        if "Approve?" in last_output or "? Press Y" in last_output:
+            return "needs_input"
+        if "Thinking" in last_output or "Processing" in last_output or "⠋" in last_output:
+            return "working"
+        if "Error:" in last_output or "Failed" in last_output:
+            return "error"
+        if ">" in last_output and len([l for l in last_lines if l.strip()]) < 3:
+            return "idle"
+        
+        return "idle"
+    
+    def get_home_dir(self) -> Path:
+        return GEMINI_HOME
+    
+    def supports_conversation_id(self) -> bool:
+        return False  # Gemini CLI doesn't support session ID yet
+
+
 # AI Tool Registry
 _AI_TOOLS = {
     "claude_code": ClaudeCodeTool(),
     "cursor": CursorTool(),
+    "gemini": GeminiTool(),
 }
 
 
