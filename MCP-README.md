@@ -136,6 +136,53 @@ Update task status/description.
 }
 ```
 
+### Session Cleanup
+
+#### `amux_delete_inactive_sessions`
+Delete all inactive (stopped) sessions. Useful for cleanup after batch work or to free up resources.
+
+**Parameters:**
+- `dry_run` (boolean, optional): If true, only shows what would be deleted without actually deleting (default: false)
+- `include_archived` (boolean, optional): If true, also delete archived sessions (default: false)
+- `exclude_names` (array of strings, optional): List of session names to exclude from deletion
+
+**Example - Dry run to see what would be deleted:**
+```json
+{
+  "dry_run": true,
+  "include_archived": false
+}
+```
+
+**Example - Delete all inactive sessions except specific ones:**
+```json
+{
+  "dry_run": false,
+  "include_archived": false,
+  "exclude_names": ["orchestrator", "monitoring"]
+}
+```
+
+**Example - Delete everything including archived:**
+```json
+{
+  "dry_run": false,
+  "include_archived": true
+}
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "deleted": ["worker-1", "worker-2", "temp-session"],
+  "deleted_count": 3,
+  "errors": [],
+  "error_count": 0,
+  "message": "Deleted 3 inactive session(s)"
+}
+```
+
 ## Usage Examples
 
 ### Example 1: Orchestrator Agent Creating Workers
