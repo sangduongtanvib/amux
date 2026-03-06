@@ -18332,13 +18332,13 @@ class CCHandler(BaseHTTPRequestHandler):
             # Build CC_FLAGS from various options
             flags_parts = []
             
-            # YOLO mode (--dangerously-skip-permissions)
-            if body.get("yolo"):
+            # YOLO mode (--dangerously-skip-permissions) - Claude Code only
+            if body.get("yolo") and tool == "claude_code":
                 flags_parts.append("--dangerously-skip-permissions")
             
-            # Model selection
+            # Model selection - Claude Code and Cursor only
             model = body.get("model", "").strip()
-            if model:
+            if model and tool in ("claude_code", "cursor"):
                 flags_parts.append(f"--model {model}")
             
             # Custom flags (raw string)
