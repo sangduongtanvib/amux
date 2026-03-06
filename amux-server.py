@@ -25,11 +25,17 @@ from urllib.parse import urlparse, parse_qs
 # Import credential manager for AI tool authentication
 try:
     import sys
-    sys.path.insert(0, str(Path(__file__).parent))
-    from credential_manager import CredentialManager
-    _CRED_MANAGER = CredentialManager()
-except ImportError:
-    print("Warning: credential-manager not available. Some auth features disabled.")
+    import importlib.util as _imp_util
+    _cred_path = Path(__file__).parent / "credential-manager.py"
+    if _cred_path.exists():
+        _spec = _imp_util.spec_from_file_location("credential_manager", _cred_path)
+        _cred_mod = _imp_util.module_from_spec(_spec)
+        _spec.loader.exec_module(_cred_mod)
+        _CRED_MANAGER = _cred_mod.CredentialManager()
+    else:
+        raise ImportError("credential-manager.py not found")
+except Exception as e:
+    print(f"Warning: credential-manager not available ({e}). Some auth features disabled.")
     _CRED_MANAGER = None
 
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
@@ -215,10 +221,8 @@ class GeminiTool(AITool):
     def get_command(self, flags: str, session_flag: str, default_flags: str, extra_flags: str) -> str:
         cmd = "gemini"
         
-        # Gemini uses --auth-type for authentication
-        # If API key is set via env var, use gemini-api-key auth type
-        if "--auth-type" not in (flags or ""):
-            cmd += " --auth-type gemini-api-key"
+        # Gemini reads GOOGLE_API_KEY or GEMINI_API_KEY from environment
+        # No auth flags needed
         
         if default_flags:
             cmd += f" {default_flags}"
@@ -231,9 +235,8 @@ class GeminiTool(AITool):
         if extra_flags:
             cmd += f" {extra_flags}"
         
-        # Default model if not specified
-        if "--model" not in cmd and "-m" not in cmd:
-            cmd += " --model gemini-2.0-flash-exp"
+        # Don't specify model - let Gemini use its default
+        # Users can override with flags if needed
         
         return cmd
     
