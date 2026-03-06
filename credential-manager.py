@@ -20,6 +20,8 @@ import os
 import base64
 import hashlib
 import time
+import shutil
+import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from cryptography.fernet import Fernet
@@ -34,6 +36,7 @@ class CredentialManager:
     CREDS_DIR = AMUX_DIR / "credentials"
     CREDS_FILE = CREDS_DIR / "credentials.enc"
     KEY_FILE = CREDS_DIR / ".key"
+    CURSOR_HOMES_DIR = AMUX_DIR / "cursor-homes"
     
     SUPPORTED_TOOLS = {
         "claude_code": {
@@ -65,7 +68,9 @@ class CredentialManager:
     def __init__(self):
         """Initialize credential manager."""
         self.CREDS_DIR.mkdir(parents=True, exist_ok=True)
+        self.CURSOR_HOMES_DIR.mkdir(parents=True, exist_ok=True)
         self._ensure_encryption_key()
+        self._account_selection_lock = threading.Lock()
     
     def _ensure_encryption_key(self):
         """Ensure encryption key exists."""
@@ -229,62 +234,64 @@ class CredentialManager:
     def get_next_account(self, tool: str) -> Optional[Dict[str, Any]]:
         """
         Get next account to use (load balancing).
+        Thread-safe: Uses lock to prevent race conditions during account selection.
         
         Returns account with credentials and increments usage.
         """
-        creds = self._load_credentials()
-        tool_creds = creds.get(tool, {})
-        
-        if "accounts" not in tool_creds or not tool_creds["accounts"]:
-            return None
-        
-        load_balancer = tool_creds.get("load_balancer", {})
-        enabled_accounts = [
-            (aid, acc) for aid, acc in tool_creds["accounts"].items()
-            if acc.get("metadata", {}).get("enabled", True)
-        ]
-        
-        if not enabled_accounts:
-            return None
-        
-        # Load balancing strategies
-        if load_balancer.get("enabled", False):
-            strategy = load_balancer.get("strategy", "round_robin")
+        with self._account_selection_lock:
+            creds = self._load_credentials()
+            tool_creds = creds.get(tool, {})
             
-            if strategy == "round_robin":
-                current_idx = load_balancer.get("current_index", 0)
-                account_id, account_data = enabled_accounts[current_idx % len(enabled_accounts)]
-                # Update index for next call
-                creds[tool]["load_balancer"]["current_index"] = (current_idx + 1) % len(enabled_accounts)
+            if "accounts" not in tool_creds or not tool_creds["accounts"]:
+                return None
             
-            elif strategy == "least_used":
-                # Sort by usage_count
-                enabled_accounts.sort(key=lambda x: x[1].get("metadata", {}).get("usage_count", 0))
-                account_id, account_data = enabled_accounts[0]
+            load_balancer = tool_creds.get("load_balancer", {})
+            enabled_accounts = [
+                (aid, acc) for aid, acc in tool_creds["accounts"].items()
+                if acc.get("metadata", {}).get("enabled", True)
+            ]
             
-            else:  # random
-                import random
-                account_id, account_data = random.choice(enabled_accounts)
-        else:
-            # No load balancing - use first enabled account (or "default")
-            if "default" in tool_creds["accounts"] and tool_creds["accounts"]["default"]["metadata"]["enabled"]:
-                account_id = "default"
-                account_data = tool_creds["accounts"]["default"]
+            if not enabled_accounts:
+                return None
+            
+            # Load balancing strategies
+            if load_balancer.get("enabled", False):
+                strategy = load_balancer.get("strategy", "round_robin")
+                
+                if strategy == "round_robin":
+                    current_idx = load_balancer.get("current_index", 0)
+                    account_id, account_data = enabled_accounts[current_idx % len(enabled_accounts)]
+                    # Update index for next call
+                    creds[tool]["load_balancer"]["current_index"] = (current_idx + 1) % len(enabled_accounts)
+                
+                elif strategy == "least_used":
+                    # Sort by usage_count
+                    enabled_accounts.sort(key=lambda x: x[1].get("metadata", {}).get("usage_count", 0))
+                    account_id, account_data = enabled_accounts[0]
+                
+                else:  # random
+                    import random
+                    account_id, account_data = random.choice(enabled_accounts)
             else:
-                account_id, account_data = enabled_accounts[0]
-        
-        # Update usage statistics
-        metadata = account_data.get("metadata", {})
-        metadata["usage_count"] = metadata.get("usage_count", 0) + 1
-        metadata["last_used"] = int(time.time())
-        
-        self._save_credentials(creds)
-        
-        return {
-            "id": account_id,
-            "credentials": account_data.get("credentials", {}),
-            "metadata": metadata
-        }
+                # No load balancing - use first enabled account (or "default")
+                if "default" in tool_creds["accounts"] and tool_creds["accounts"]["default"]["metadata"]["enabled"]:
+                    account_id = "default"
+                    account_data = tool_creds["accounts"]["default"]
+                else:
+                    account_id, account_data = enabled_accounts[0]
+            
+            # Update usage statistics
+            metadata = account_data.get("metadata", {})
+            metadata["usage_count"] = metadata.get("usage_count", 0) + 1
+            metadata["last_used"] = int(time.time())
+            
+            self._save_credentials(creds)
+            
+            return {
+                "id": account_id,
+                "credentials": account_data.get("credentials", {}),
+                "metadata": metadata
+            }
     
     def delete_credential(self, tool: str, cred_type: str, account_id: str = "default"):
         """Delete a specific credential type from an account (deprecated - use delete_account instead)."""
@@ -507,6 +514,87 @@ class CredentialManager:
                 print(f"   💡 Supported: {', '.join(auth_types)}")
             
             print()
+    
+    def prepare_cursor_session(self, session_name: str, account_id: Optional[str] = None) -> Dict[str, str]:
+        """
+        Prepare isolated Cursor environment for a session.
+        Thread-safe: No locks needed - each session has unique path.
+        
+        Args:
+            session_name: Unique session identifier
+            account_id: Optional specific account ID. If None, uses load balancing.
+        
+        Returns:
+            Dict of environment variables to inject into session:
+            - HOME: Path to isolated home directory
+            - AMUX_CURSOR_ACCOUNT: Account ID being used
+        
+        Raises:
+            ValueError: If no Cursor accounts are configured
+            FileNotFoundError: If account config file not found
+        """
+        # Get account via load balancer (thread-safe internally)
+        if not account_id:
+            account = self.get_next_account("cursor")
+            if not account:
+                raise ValueError("No Cursor accounts configured. Add one via dashboard Credentials tab.")
+            account_id = account['id']
+        
+        # Create isolated home for this session
+        session_home = self.CURSOR_HOMES_DIR / session_name
+        session_home.mkdir(parents=True, exist_ok=True)
+        cursor_dir = session_home / ".cursor"
+        cursor_dir.mkdir(exist_ok=True)
+        
+        # Copy account config to isolated home
+        account_config_path = self.CREDS_DIR / "cursor" / f"{account_id}.json"
+        if not account_config_path.exists():
+            # Fallback: try loading from encrypted credentials
+            creds = self._load_credentials()
+            if "cursor" in creds and "accounts" in creds["cursor"] and account_id in creds["cursor"]["accounts"]:
+                # Account exists in DB but config file not exported yet
+                raise FileNotFoundError(
+                    f"Cursor config for account '{account_id}' not found.\n"
+                    f"Please login to Cursor with this account and run: cursor --login\n"
+                    f"Expected file: {account_config_path}"
+                )
+            else:
+                raise FileNotFoundError(f"Cursor account '{account_id}' not found in credentials")
+        
+        # Safe atomic copy
+        target_config = cursor_dir / "cli-config.json"
+        shutil.copy2(account_config_path, target_config)
+        
+        print(f"[cursor-isolation] Session '{session_name}' using account '{account_id}'")
+        print(f"[cursor-isolation] Isolated home: {session_home}")
+        
+        # Return env vars to inject into tmux session
+        return {
+            "HOME": str(session_home),
+            "AMUX_CURSOR_ACCOUNT": account_id,
+            "AMUX_CURSOR_ISOLATED": "true"
+        }
+    
+    def cleanup_cursor_session(self, session_name: str) -> bool:
+        """
+        Clean up isolated Cursor environment after session stops.
+        
+        Args:
+            session_name: Session identifier
+        
+        Returns:
+            True if cleanup successful, False if nothing to clean
+        """
+        session_home = self.CURSOR_HOMES_DIR / session_name
+        if session_home.exists():
+            try:
+                shutil.rmtree(session_home)
+                print(f"[cursor-isolation] Cleaned up home for session '{session_name}'")
+                return True
+            except Exception as e:
+                print(f"[cursor-isolation] Warning: Failed to cleanup {session_home}: {e}")
+                return False
+        return False
 
 
 def main():
