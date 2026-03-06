@@ -3290,7 +3290,16 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Add the shell command
         tmux_cmd.append(shell_rc + cmd)
         
-        subprocess.run(tmux_cmd, check=True, capture_output=True, timeout=10)
+        # DEBUG: Log the exact tmux command
+        print(f"[debug] Starting session {name} with tool {tool_name}")
+        print(f"[debug] Command: {cmd}")
+        print(f"[debug] Working dir: {work_dir}")
+        
+        result = subprocess.run(tmux_cmd, capture_output=True, timeout=10)
+        if result.returncode != 0:
+            error_msg = result.stderr.decode() if result.stderr else "unknown error"
+            print(f"[error] Failed to create tmux session: {error_msg}")
+            raise subprocess.CalledProcessError(result.returncode, tmux_cmd, result.stdout, result.stderr)
         # Lock the window name immediately (before Claude output can rename it)
         subprocess.run(
             ["tmux", "set-option", "-t", tmux_sess, "allow-rename", "off"],
