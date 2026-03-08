@@ -18332,9 +18332,13 @@ class CCHandler(BaseHTTPRequestHandler):
             # Build CC_FLAGS from various options
             flags_parts = []
             
-            # YOLO mode (--dangerously-skip-permissions) - Claude Code only
-            if body.get("yolo") and tool == "claude_code":
-                flags_parts.append("--dangerously-skip-permissions")
+            # YOLO mode - different flag per tool
+            if body.get("yolo"):
+                if tool == "claude_code":
+                    flags_parts.append("--dangerously-skip-permissions")
+                elif tool == "cursor":
+                    flags_parts.append("--yolo")
+                # Gemini doesn't support yolo mode
             
             # Model selection - Claude Code and Cursor only
             model = body.get("model", "").strip()
@@ -19450,7 +19454,7 @@ def main():
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
-    schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    # schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)  # DISABLED: Email sync disabled per user request
     if _AUTO_UPDATE_REPO:
         slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
         schedule_job(_auto_update_check, interval=_AUTO_UPDATE_INTERVAL, name="auto_update", initial_delay=_AUTO_UPDATE_INTERVAL)
