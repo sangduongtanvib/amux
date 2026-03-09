@@ -169,6 +169,212 @@ def tool_amux_send_message(args: Dict) -> Dict:
     }
 
 
+def tool_amux_batch_send_messages(args: Dict) -> Dict:
+    """Send messages to multiple sessions in one call.
+    
+    This is much more efficient than calling amux_send_message multiple times.
+    All messages are sent in parallel (as fast as the API allows).
+    """
+    messages = args.get("messages", [])
+    
+    if not messages:
+        raise ValueError("At least one message is required")
+    
+    if not isinstance(messages, list):
+        raise ValueError("'messages' must be an array of {session, text} objects")
+    
+    # Validate all messages first
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            raise ValueError(f"Message {i+1} must be an object with 'session' and 'text' fields")
+        if not msg.get("session"):
+            raise ValueError(f"Message {i+1}: 'session' is required")
+        if not msg.get("text"):
+            raise ValueError(f"Message {i+1}: 'text' is required")
+    
+    # Send all messages
+    results = []
+    success_count = 0
+    error_count = 0
+    
+    for msg in messages:
+        session = msg["session"]
+        text = msg["text"]
+        
+        try:
+            data = {"text": text}
+            amux_api_call(f"/api/sessions/{session}/send", method="POST", data=data)
+            results.append({
+                "session": session,
+                "success": True,
+                "message": f"Sent: {text[:50]}..."
+            })
+            success_count += 1
+        except Exception as e:
+            results.append({
+                "session": session,
+                "success": False,
+                "error": str(e)
+            })
+            error_count += 1
+    
+    return {
+        "ok": True,
+        "total": len(messages),
+        "success": success_count,
+        "errors": error_count,
+        "results": results,
+        "message": f"Sent {success_count}/{len(messages)} messages" + 
+                   (f", {error_count} failed" if error_count > 0 else "")
+    }
+
+
+def tool_amux_batch_operations(args: Dict) -> Dict:
+    """Execute multiple operations (start, stop, send, etc.) in one call.
+    
+    This is the most flexible batch tool - supports mixed operations.
+    Operations are executed sequentially in the order provided.
+    """
+    operations = args.get("operations", [])
+    
+    if not operations:
+        raise ValueError("At least one operation is required")
+    
+    if not isinstance(operations, list):
+        raise ValueError("'operations' must be an array of operation objects")
+    
+    # Validate operations
+    valid_ops = {"start", "stop", "send", "create_task", "claim_task", "update_task"}
+    for i, op in enumerate(operations):
+        if not isinstance(op, dict):
+            raise ValueError(f"Operation {i+1} must be an object")
+        if not op.get("type"):
+            raise ValueError(f"Operation {i+1}: 'type' is required")
+        if op["type"] not in valid_ops:
+            raise ValueError(f"Operation {i+1}: type must be one of {valid_ops}")
+    
+    results = []
+    success_count = 0
+    error_count = 0
+    
+    for op in operations:
+        op_type = op["type"]
+        
+        try:
+            if op_type == "start":
+                session = op.get("session")
+                if not session:
+                    raise ValueError("'session' is required for start operation")
+                amux_api_call(f"/api/sessions/{session}/start", method="POST")
+                results.append({
+                    "type": "start",
+                    "session": session,
+                    "success": True
+                })
+                success_count += 1
+                
+            elif op_type == "stop":
+                session = op.get("session")
+                if not session:
+                    raise ValueError("'session' is required for stop operation")
+                amux_api_call(f"/api/sessions/{session}/stop", method="POST")
+                results.append({
+                    "type": "stop",
+                    "session": session,
+                    "success": True
+                })
+                success_count += 1
+                
+            elif op_type == "send":
+                session = op.get("session")
+                text = op.get("text")
+                if not session or not text:
+                    raise ValueError("'session' and 'text' are required for send operation")
+                data = {"text": text}
+                amux_api_call(f"/api/sessions/{session}/send", method="POST", data=data)
+                results.append({
+                    "type": "send",
+                    "session": session,
+                    "success": True,
+                    "message": f"Sent: {text[:50]}..."
+                })
+                success_count += 1
+                
+            elif op_type == "create_task":
+                title = op.get("title")
+                if not title:
+                    raise ValueError("'title' is required for create_task operation")
+                data = {
+                    "title": title,
+                    "desc": op.get("desc", ""),
+                    "status": op.get("status", "todo"),
+                    "session": op.get("session", ""),
+                    "owner_type": "agent",
+                }
+                result = amux_api_call("/api/board", method="POST", data=data)
+                results.append({
+                    "type": "create_task",
+                    "success": True,
+                    "task_id": result.get("id", "")
+                })
+                success_count += 1
+                
+            elif op_type == "claim_task":
+                task_id = op.get("task_id")
+                session = op.get("session")
+                if not task_id or not session:
+                    raise ValueError("'task_id' and 'session' are required for claim_task")
+                data = {"session": session}
+                amux_api_call(f"/api/board/{task_id}/claim", method="POST", data=data)
+                results.append({
+                    "type": "claim_task",
+                    "task_id": task_id,
+                    "session": session,
+                    "success": True
+                })
+                success_count += 1
+                
+            elif op_type == "update_task":
+                task_id = op.get("task_id")
+                if not task_id:
+                    raise ValueError("'task_id' is required for update_task")
+                data = {}
+                if "status" in op:
+                    data["status"] = op["status"]
+                if "desc" in op:
+                    data["desc"] = op["desc"]
+                if "title" in op:
+                    data["title"] = op["title"]
+                if not data:
+                    raise ValueError("At least one field to update is required")
+                amux_api_call(f"/api/board/{task_id}", method="PATCH", data=data)
+                results.append({
+                    "type": "update_task",
+                    "task_id": task_id,
+                    "success": True
+                })
+                success_count += 1
+                
+        except Exception as e:
+            results.append({
+                "type": op_type,
+                "success": False,
+                "error": str(e),
+                **{k: v for k, v in op.items() if k != "type"}
+            })
+            error_count += 1
+    
+    return {
+        "ok": True,
+        "total": len(operations),
+        "success": success_count,
+        "errors": error_count,
+        "results": results,
+        "message": f"Executed {success_count}/{len(operations)} operations" +
+                   (f", {error_count} failed" if error_count > 0 else "")
+    }
+
+
 def tool_amux_get_status(args: Dict) -> Dict:
     """Get detailed status of one or all sessions."""
     name = args.get("name")
@@ -599,6 +805,85 @@ MCP_TOOLS = {
             "required": ["name", "text"]
         },
         "handler": tool_amux_send_message
+    },
+    "amux_batch_send_messages": {
+        "description": "Send messages to multiple sessions in ONE call. Much more efficient than calling amux_send_message multiple times. All messages are sent in parallel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "messages": {
+                    "type": "array",
+                    "description": "Array of message objects to send",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "session": {
+                                "type": "string",
+                                "description": "Session name to send to"
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "Message text or prompt"
+                            }
+                        },
+                        "required": ["session", "text"]
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": ["messages"]
+        },
+        "handler": tool_amux_batch_send_messages
+    },
+    "amux_batch_operations": {
+        "description": "Execute multiple operations (start, stop, send, create_task, claim_task, update_task) in ONE call. Most flexible batch tool - supports mixed operation types. Operations execute sequentially in order.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operations": {
+                    "type": "array",
+                    "description": "Array of operations to execute",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "description": "Operation type",
+                                "enum": ["start", "stop", "send", "create_task", "claim_task", "update_task"]
+                            },
+                            "session": {
+                                "type": "string",
+                                "description": "Session name (for start, stop, send, claim_task, create_task)"
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "Message text (for send operation)"
+                            },
+                            "task_id": {
+                                "type": "string",
+                                "description": "Task ID (for claim_task, update_task)"
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Task title (for create_task, update_task)"
+                            },
+                            "desc": {
+                                "type": "string",
+                                "description": "Task description (for create_task, update_task)"
+                            },
+                            "status": {
+                                "type": "string",
+                                "description": "Task status (for create_task, update_task)"
+                            }
+                        },
+                        "required": ["type"]
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": ["operations"]
+        },
+        "handler": tool_amux_batch_operations
     },
     "amux_get_status": {
         "description": "Get status of sessions (specific session or all sessions summary)",

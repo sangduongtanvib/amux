@@ -103,6 +103,8 @@ A system where:
 | Tool | Purpose |
 |------|---------|
 | `amux_get_orchestrator_view` | **[NEW]** Get all sessions + tasks + output in ONE call |
+| `amux_batch_send_messages` | **[NEW]** Send to multiple sessions in ONE call |
+| `amux_batch_operations` | **[NEW]** Execute mixed operations in ONE call |
 | `amux_list_sessions` | List all sessions |
 | `amux_create_session` | Create new worker session |
 | `amux_start_session` | Start a session |
@@ -453,11 +455,13 @@ Create session with `tool: "gemini"`, verify it starts correctly
 
 ## 📚 Documentation
 
+- **[BATCH-OPERATIONS.md](BATCH-OPERATIONS.md)** — Batch operations for efficiency
 - **[ORCHESTRATOR-VIEW.md](ORCHESTRATOR-VIEW.md)** — New efficient monitoring tool
 - **[MCP-README.md](MCP-README.md)** — MCP server documentation
 - **[CLAUDE.md](CLAUDE.md)** — AMUX project guidelines
 - **[demo-mcp-orchestration.py](demo-mcp-orchestration.py)** — Usage demo
 - **[demo-orchestrator-view.py](demo-orchestrator-view.py)** — Orchestrator view demo
+- **[demo-batch-operations.py](demo-batch-operations.py)** — Batch operations demo
 - **[README.md](README.md)** — Main project README
 
 ---

@@ -99,6 +99,74 @@ See [ORCHESTRATOR-VIEW.md](ORCHESTRATOR-VIEW.md) for detailed guide.
 
 ---
 
+### Batch Operations (Recommended)
+
+#### `amux_batch_send_messages` ⭐ NEW
+**Send messages to multiple sessions in ONE call.**
+
+Instead of calling `amux_send_message` multiple times, send all messages at once.
+
+**Parameters:**
+```json
+{
+  "messages": [
+    {"session": "worker1", "text": "Build the login form"},
+    {"session": "worker2", "text": "Implement auth API"},
+    {"session": "worker3", "text": "Write tests"}
+  ]
+}
+```
+
+**Returns:**
+```json
+{
+  "ok": true,
+  "total": 3,
+  "success": 3,
+  "errors": 0,
+  "results": [
+    {"session": "worker1", "success": true, "message": "Sent: Build the login form..."},
+    {"session": "worker2", "success": true, "message": "Sent: Implement auth API..."},
+    {"session": "worker3", "success": true, "message": "Sent: Write tests..."}
+  ],
+  "message": "Sent 3/3 messages"
+}
+```
+
+**Performance:** N× faster (where N = number of sessions)
+
+---
+
+#### `amux_batch_operations` ⭐ NEW
+**Execute multiple operations (start, stop, send, create_task, claim_task, update_task) in ONE call.**
+
+Most flexible batch tool - supports mixed operation types.
+
+**Parameters:**
+```json
+{
+  "operations": [
+    {"type": "start", "session": "worker1"},
+    {"type": "create_task", "title": "Build UI", "session": "worker1"},
+    {"type": "send", "session": "worker1", "text": "Check board and start"}
+  ]
+}
+```
+
+**Supported operations:**
+- `start` - Start a session
+- `stop` - Stop a session
+- `send` - Send message to session
+- `create_task` - Create board task
+- `claim_task` - Claim task for session
+- `update_task` - Update task status/desc/title
+
+**Performance:** Up to 10× faster than individual calls
+
+See [BATCH-OPERATIONS.md](BATCH-OPERATIONS.md) for detailed guide.
+
+---
+
 ### Session Management
 
 #### `amux_list_sessions`
