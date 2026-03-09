@@ -102,6 +102,7 @@ A system where:
 
 | Tool | Purpose |
 |------|---------|
+| `amux_get_orchestrator_view` | **[NEW]** Get all sessions + tasks + output in ONE call |
 | `amux_list_sessions` | List all sessions |
 | `amux_create_session` | Create new worker session |
 | `amux_start_session` | Start a session |
@@ -113,6 +114,7 @@ A system where:
 | `amux_create_board_task` | Create task |
 | `amux_claim_task` | Claim task (atomic) |
 | `amux_update_task` | Update task status |
+| `amux_delete_inactive_sessions` | Cleanup stopped sessions |
 
 **Result:** ✅ AI agents can now orchestrate AMUX via MCP
 
@@ -182,14 +184,30 @@ pipeline:
 
 Orchestrator agent manually creates workers and assigns tasks:
 
+**Before (Inefficient - Multiple Calls):**
 ```
 Orchestrator: "Create session 'backend-dev' with claude_code tool"
               "Create task 'Build API' assigned to backend-dev"
               "Start session backend-dev"
               "Send message to backend-dev: 'Check board and implement API'"
+              "Peek output from backend-dev"  ← separate call
+              "Peek output from frontend-dev"  ← separate call
+              "Peek output from test-worker"   ← separate call
+              "List board tasks"               ← separate call
 ```
 
-**Demo:** See `demo-mcp-orchestration.py`
+**After (Efficient - Single Call):**
+```
+Orchestrator: "Create session 'backend-dev' with claude_code tool"
+              "Start session backend-dev"
+              "Send message: 'Check board and implement API'"
+              
+              # Monitor everything in ONE call:
+              view = amux_get_orchestrator_view()
+              # Returns: all sessions, outputs, tasks, summary
+```
+
+**Demo:** See `demo-mcp-orchestration.py` and `demo-orchestrator-view.py`
 
 ---
 
@@ -435,9 +453,11 @@ Create session with `tool: "gemini"`, verify it starts correctly
 
 ## 📚 Documentation
 
+- **[ORCHESTRATOR-VIEW.md](ORCHESTRATOR-VIEW.md)** — New efficient monitoring tool
 - **[MCP-README.md](MCP-README.md)** — MCP server documentation
 - **[CLAUDE.md](CLAUDE.md)** — AMUX project guidelines
 - **[demo-mcp-orchestration.py](demo-mcp-orchestration.py)** — Usage demo
+- **[demo-orchestrator-view.py](demo-orchestrator-view.py)** — Orchestrator view demo
 - **[README.md](README.md)** — Main project README
 
 ---

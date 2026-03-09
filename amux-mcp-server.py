@@ -392,6 +392,111 @@ def tool_amux_delete_inactive_sessions(args: Dict) -> Dict:
     }
 
 
+def tool_amux_get_orchestrator_view(args: Dict) -> Dict:
+    """Get comprehensive view of all sessions and tasks in one call.
+    
+    This is the primary tool for orchestrator agents to monitor their workers.
+    Returns all sessions with full status, output preview, and board tasks.
+    """
+    # Optional filters
+    session_names = args.get("sessions", [])  # Empty = all sessions
+    include_output = args.get("include_output", True)
+    output_lines = args.get("output_lines", 30)
+    include_tasks = args.get("include_tasks", True)
+    task_status_filter = args.get("task_status", "")
+    
+    # Fetch all sessions
+    all_sessions = amux_api_call("/api/sessions")
+    
+    # Filter sessions if specific names provided
+    if session_names:
+        all_sessions = [s for s in all_sessions if s.get("name") in session_names]
+    
+    # Build detailed session info
+    sessions_info = []
+    needs_attention = []  # Sessions requiring approval or action
+    
+    for s in all_sessions:
+        name = s.get("name", "")
+        status = s.get("status", "")
+        running = s.get("running", False)
+        
+        session_data = {
+            "name": name,
+            "status": status,
+            "running": running,
+            "dir": s.get("dir", ""),
+            "tool": s.get("tool", "claude_code"),
+            "desc": s.get("desc", ""),
+            "preview": s.get("preview", ""),
+            "created": s.get("created", ""),
+            "last_active": s.get("last_active", ""),
+        }
+        
+        # Fetch terminal output if requested
+        if include_output and running:
+            try:
+                peek_result = amux_api_call(f"/api/sessions/{name}/peek?lines={output_lines}")
+                session_data["output"] = peek_result.get("output", "")
+            except Exception as e:
+                session_data["output"] = f"[Error fetching output: {str(e)}]"
+        
+        # Check if session needs attention
+        if status == "needs_input" or "approve" in session_data.get("preview", "").lower():
+            needs_attention.append(name)
+        
+        sessions_info.append(session_data)
+    
+    # Fetch board tasks if requested
+    tasks_info = []
+    if include_tasks:
+        board_tasks = amux_api_call("/api/board")
+        
+        # Filter by status if specified
+        if task_status_filter:
+            board_tasks = [t for t in board_tasks if t.get("status") == task_status_filter]
+        
+        # Filter by sessions if specific sessions requested
+        if session_names:
+            board_tasks = [
+                t for t in board_tasks 
+                if not t.get("session") or t.get("session") in session_names
+            ]
+        
+        for t in board_tasks:
+            tasks_info.append({
+                "id": t.get("id"),
+                "title": t.get("title"),
+                "status": t.get("status"),
+                "session": t.get("session", ""),
+                "desc": t.get("desc", ""),
+                "created": t.get("created", ""),
+                "updated": t.get("updated", ""),
+                "due": t.get("due", ""),
+            })
+    
+    # Build summary statistics
+    summary = {
+        "total_sessions": len(sessions_info),
+        "running_sessions": sum(1 for s in sessions_info if s["running"]),
+        "needs_attention": len(needs_attention),
+        "idle_sessions": sum(1 for s in sessions_info if s["status"] == "idle"),
+        "working_sessions": sum(1 for s in sessions_info if s["status"] == "working"),
+        "total_tasks": len(tasks_info),
+        "todo_tasks": sum(1 for t in tasks_info if t["status"] == "todo"),
+        "doing_tasks": sum(1 for t in tasks_info if t["status"] == "doing"),
+        "done_tasks": sum(1 for t in tasks_info if t["status"] == "done"),
+    }
+    
+    return {
+        "summary": summary,
+        "sessions": sessions_info,
+        "needs_attention": needs_attention,
+        "tasks": tasks_info,
+        "timestamp": amux_api_call("/api/sessions")[0].get("last_active", "") if all_sessions else "",
+    }
+
+
 # ═══════════════════════════════════════════
 # MCP PROTOCOL IMPLEMENTATION
 # ═══════════════════════════════════════════
@@ -642,6 +747,42 @@ MCP_TOOLS = {
             "required": []
         },
         "handler": tool_amux_delete_inactive_sessions
+    },
+    "amux_get_orchestrator_view": {
+        "description": "Get comprehensive view of all managed sessions and tasks in ONE call. This is the primary monitoring tool for orchestrator agents - returns full status, output previews, and board tasks without multiple API calls.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Optional: list of specific session names to monitor. If empty/omitted, returns ALL sessions."
+                },
+                "include_output": {
+                    "type": "boolean",
+                    "description": "Whether to include terminal output from each session (default: true)",
+                    "default": True
+                },
+                "output_lines": {
+                    "type": "integer",
+                    "description": "Number of output lines to fetch per session (default: 30)",
+                    "default": 30
+                },
+                "include_tasks": {
+                    "type": "boolean",
+                    "description": "Whether to include board tasks (default: true)",
+                    "default": True
+                },
+                "task_status": {
+                    "type": "string",
+                    "description": "Optional: filter tasks by status (todo, doing, done, etc). If empty, returns all tasks."
+                }
+            },
+            "required": []
+        },
+        "handler": tool_amux_get_orchestrator_view
     },
 }
 
