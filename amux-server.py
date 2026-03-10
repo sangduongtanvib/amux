@@ -3267,26 +3267,6 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         if mcp_flag not in flags:
             flags = f"{flags} {mcp_flag}".strip()
     
-    # Cursor: Copy mcp.json to .cursor/mcp.json and auto-approve MCPs
-    # Only do this when work_dir is a dedicated project directory (not home), to avoid
-    # overwriting the user's global ~/.cursor/mcp.json.
-    if tool_name == "cursor" and mcp_file.exists() and Path(work_dir).resolve() != Path.home().resolve():
-        try:
-            cursor_config_dir = Path(work_dir) / ".cursor"
-            cursor_config_dir.mkdir(exist_ok=True)
-            cursor_mcp_file = cursor_config_dir / "mcp.json"
-            
-            # Copy mcp.json to .cursor/mcp.json
-            import shutil
-            shutil.copy2(mcp_file, cursor_mcp_file)
-            slog(f"[MCP] Copied mcp.json to .cursor/mcp.json for Cursor session '{name}'")
-            
-            # Add --approve-mcps flag to auto-approve all MCP servers
-            if "--approve-mcps" not in flags:
-                flags = f"{flags} --approve-mcps".strip()
-                slog(f"[MCP] Added --approve-mcps flag for Cursor session '{name}'")
-        except Exception as e:
-            slog(f"[MCP] Warning: Failed to setup Cursor MCP config: {e}")
 
     # Determine session-specific conversation ID for isolation (if supported by tool)
     meta = _load_meta(name)
