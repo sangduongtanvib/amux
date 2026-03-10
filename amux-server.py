@@ -3191,7 +3191,10 @@ def _generate_session_mcp_json(name: str, work_dir: str):
             
             mcp_servers[r["name"]] = server_config
         
-        # Write mcp.json to work directory
+        # Write mcp.json to work directory (skip if work_dir is home to avoid polluting ~/)
+        if Path(work_dir).resolve() == Path.home().resolve():
+            slog(f"[MCP] Skipping mcp.json generation for session '{name}': work_dir is home directory")
+            return
         mcp_config = {"mcpServers": mcp_servers}
         work_path = Path(work_dir)
         mcp_file = work_path / "mcp.json"
@@ -3265,7 +3268,9 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             flags = f"{flags} {mcp_flag}".strip()
     
     # Cursor: Copy mcp.json to .cursor/mcp.json and auto-approve MCPs
-    if tool_name == "cursor" and mcp_file.exists():
+    # Only do this when work_dir is a dedicated project directory (not home), to avoid
+    # overwriting the user's global ~/.cursor/mcp.json.
+    if tool_name == "cursor" and mcp_file.exists() and Path(work_dir).resolve() != Path.home().resolve():
         try:
             cursor_config_dir = Path(work_dir) / ".cursor"
             cursor_config_dir.mkdir(exist_ok=True)
