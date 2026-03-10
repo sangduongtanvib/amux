@@ -3093,6 +3093,57 @@ def _capture_claude_memory_changes(name: str, work_dir: str):
         pass
 
 
+def _sync_global_mcps_to_db():
+    """Import MCPs from global ~/.cursor/mcp.json into AMUX database if not exist."""
+    global_mcp_file = Path.home() / ".cursor" / "mcp.json"
+    if not global_mcp_file.exists():
+        return
+    
+    try:
+        with open(global_mcp_file) as f:
+            global_config = json.load(f)
+        
+        servers = global_config.get("mcpServers", {})
+        if not servers:
+            return
+        
+        db = get_db()
+        now = int(time.time())
+        imported = 0
+        
+        for server_id, config in servers.items():
+            # Check if already exists
+            existing = db.execute(
+                "SELECT id FROM mcp_configs WHERE id = ? OR name = ?",
+                (server_id, server_id)
+            ).fetchone()
+            
+            if existing:
+                continue
+            
+            # Import new MCP
+            mcp_type = config.get("type", "stdio")
+            command = config.get("command")
+            args = json.dumps(config.get("args", []))
+            url = config.get("url")
+            headers = json.dumps(config.get("headers", {})) if config.get("headers") else None
+            env_vars = json.dumps(config.get("env", {})) if config.get("env") else None
+            
+            db.execute(
+                """INSERT INTO mcp_configs 
+                   (id, name, type, command, args, url, headers, env_vars, enabled, created, updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (server_id, server_id, mcp_type, command, args, url, headers, env_vars, now, now)
+            )
+            imported += 1
+        
+        if imported > 0:
+            db.commit()
+            slog(f"[MCP] Imported {imported} new MCP(s) from global ~/.cursor/mcp.json")
+    except Exception as e:
+        slog(f"[MCP] Warning: Failed to sync global MCPs: {e}")
+
+
 def _generate_session_mcp_json(name: str, work_dir: str):
     """Generate session-specific mcp.json from database configuration."""
     try:
@@ -3212,6 +3263,25 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         mcp_flag = f"--mcp-config {shlex.quote(str(mcp_file))} --strict-mcp-config"
         if mcp_flag not in flags:
             flags = f"{flags} {mcp_flag}".strip()
+    
+    # Cursor: Copy mcp.json to .cursor/mcp.json and auto-approve MCPs
+    if tool_name == "cursor" and mcp_file.exists():
+        try:
+            cursor_config_dir = Path(work_dir) / ".cursor"
+            cursor_config_dir.mkdir(exist_ok=True)
+            cursor_mcp_file = cursor_config_dir / "mcp.json"
+            
+            # Copy mcp.json to .cursor/mcp.json
+            import shutil
+            shutil.copy2(mcp_file, cursor_mcp_file)
+            slog(f"[MCP] Copied mcp.json to .cursor/mcp.json for Cursor session '{name}'")
+            
+            # Add --approve-mcps flag to auto-approve all MCP servers
+            if "--approve-mcps" not in flags:
+                flags = f"{flags} --approve-mcps".strip()
+                slog(f"[MCP] Added --approve-mcps flag for Cursor session '{name}'")
+        except Exception as e:
+            slog(f"[MCP] Warning: Failed to setup Cursor MCP config: {e}")
 
     # Determine session-specific conversation ID for isolation (if supported by tool)
     meta = _load_meta(name)
@@ -18364,6 +18434,28 @@ class CCHandler(BaseHTTPRequestHandler):
             })
             if dir_path:
                 _ensure_memory(name, dir_path)
+            
+            # Sync global MCPs first, then auto-assign all enabled MCPs to new session
+            try:
+                _sync_global_mcps_to_db()
+                
+                db = get_db()
+                enabled_mcps = db.execute(
+                    "SELECT id FROM mcp_configs WHERE enabled = 1 AND deleted IS NULL"
+                ).fetchall()
+                
+                if enabled_mcps:
+                    now = int(time.time())
+                    for idx, row in enumerate(enabled_mcps):
+                        db.execute(
+                            "INSERT INTO session_mcp_links (session, mcp_id, position, created) VALUES (?, ?, ?, ?)",
+                            (name, row["id"], idx, now)
+                        )
+                    db.commit()
+                    slog(f"[MCP] Auto-assigned {len(enabled_mcps)} enabled MCPs to new session '{name}'")
+            except Exception as e:
+                slog(f"[MCP] Warning: Failed to auto-assign MCPs to session '{name}': {e}")
+            
             return self._json({"ok": True, "message": f"created {name}"})
 
         # GET /api/sessions/self?session=<name> — convenience for a session to look itself up
