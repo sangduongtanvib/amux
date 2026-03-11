@@ -5758,6 +5758,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-credentials" onclick="switchView('credentials')">Credentials</button>
   <button id="tab-mcp" onclick="switchView('mcp')">MCP</button>
+  <button id="tab-skills" onclick="switchView('skills')">Skills</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
@@ -6035,6 +6036,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span id="mcp-editor-lines"></span>
     </div>
   </div>
+</div>
+
+<div id="skills-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div style="padding:10px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">
+    <span style="font-weight:600;font-size:0.85rem;">Agent Skills Library</span>
+    <div style="flex:1;"></div>
+    <button class="btn" onclick="createNewSkill()" style="font-size:0.78rem;padding:4px 10px;background:var(--accent);color:#000;">➕ New Skill</button>
+  </div>
+  <div style="margin:12px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
+    Skills are auto-injected into sessions' <code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-family:monospace;">.cursor/skills/</code> directory when started.
+    <span style="display:block;margin-top:6px;">Location: <code style="background:var(--bg);padding:2px 6px;border-radius:3px;font-family:monospace;">~/.amux/skills/</code></span>
+  </div>
+  <div id="skills-list" style="flex:1;overflow-y:auto;padding:0 12px 12px;"></div>
 </div>
 
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
@@ -12634,6 +12648,64 @@ function statusStyle(id) {
   return palette[Math.max(0, idx) % palette.length];
 }
 
+// Skills management
+async function loadSkills() {
+  try {
+    const resp = await fetch(API + '/api/skills');
+    if (!resp.ok) throw new Error('Failed to load skills');
+    const skills = await resp.json();
+    renderSkills(skills);
+  } catch (err) {
+    console.error('Load skills error:', err);
+    showToast('Failed to load skills', 'error');
+  }
+}
+
+function renderSkills(skills) {
+  const container = document.getElementById('skills-list');
+  if (!skills || skills.length === 0) {
+    container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--dim);">No skills found. Click <strong>➕ New Skill</strong> to create one.</div>';
+    return;
+  }
+  container.innerHTML = skills.map(skill => `
+    <div class="skill-card" style="margin-bottom:12px;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:8px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-weight:600;font-size:0.88rem;flex:1;">${escapeHtml(skill.name)}</span>
+        <button class="btn" onclick="editSkill('${escapeHtml(skill.name)}')" style="font-size:0.7rem;padding:2px 8px;">✏️ Edit</button>
+        <button class="btn" onclick="deleteSkill('${escapeHtml(skill.name)}')" style="font-size:0.7rem;padding:2px 8px;background:var(--red);color:#fff;">🗑️</button>
+      </div>
+      <div style="font-size:0.75rem;color:var(--dim);line-height:1.5;">${escapeHtml(skill.description || 'No description')}</div>
+    </div>
+  `).join('');
+}
+
+function createNewSkill() {
+  const name = prompt('Skill filename (without .md):');
+  if (!name) return;
+  const filename = name.endsWith('.md') ? name : name + '.md';
+  window.open(`/files?path=${encodeURIComponent('~/.amux/skills/' + filename)}&create=1`, '_blank');
+  showToast('Opening editor in new tab...', 'info');
+}
+
+async function editSkill(name) {
+  window.open(`/files?path=${encodeURIComponent('~/.amux/skills/' + name)}`, '_blank');
+}
+
+async function deleteSkill(name) {
+  if (!confirm(`Delete skill "${name}"?`)) return;
+  try {
+    const resp = await fetch(API + '/api/skills/' + encodeURIComponent(name.replace('.md', '')), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) throw new Error('Failed to delete skill');
+    showToast('Skill deleted', 'success');
+    loadSkills();
+  } catch (err) {
+    console.error('Delete skill error:', err);
+    showToast('Failed to delete skill', 'error');
+  }
+}
+
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
@@ -12644,6 +12716,7 @@ function switchView(view) {
   document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
   document.getElementById('credentials-view').style.display = view === 'credentials' ? '' : 'none';
   document.getElementById('mcp-view').style.display = view === 'mcp' ? '' : 'none';
+  document.getElementById('skills-view').style.display = view === 'skills' ? 'flex' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
@@ -12655,6 +12728,7 @@ function switchView(view) {
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
   document.getElementById('tab-credentials').classList.toggle('active', view === 'credentials');
   document.getElementById('tab-mcp').classList.toggle('active', view === 'mcp');
+  document.getElementById('tab-skills').classList.toggle('active', view === 'skills');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
   document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
@@ -12665,6 +12739,7 @@ function switchView(view) {
   if (view === 'email') _emailLoad();
   if (view === 'credentials') loadCredentials();
   if (view === 'mcp') { /* Desktop MCP editor - no auto-load */ }
+  if (view === 'skills') loadSkills();
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
