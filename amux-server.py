@@ -3240,6 +3240,36 @@ def _ensure_memory(name: str, work_dir: str):
     _write_claude_memory(name, work_dir)
 
 
+def _ensure_skills(work_dir: str):
+    """Copy skills from ~/.amux/skills/ to {work_dir}/.cursor/skills/ for agent access.
+    
+    This allows skills to work across all AI tools (Claude Code, Cursor, Gemini).
+    Skills are copied (not symlinked) to avoid permission issues.
+    """
+    # Skip if work_dir is home to avoid polluting ~/
+    if Path(work_dir).resolve() == Path.home().resolve():
+        return
+    
+    amux_skills_dir = CC_HOME / "skills"
+    if not amux_skills_dir.exists():
+        return
+    
+    cursor_skills_dir = Path(work_dir) / ".cursor" / "skills"
+    
+    try:
+        # Copy each skill from ~/.amux/skills/ to project .cursor/skills/
+        for skill_file in amux_skills_dir.glob("*.md"):
+            cursor_skills_dir.mkdir(parents=True, exist_ok=True)
+            target = cursor_skills_dir / skill_file.name
+            # Only copy if source is newer or target doesn't exist
+            if not target.exists() or skill_file.stat().st_mtime > target.stat().st_mtime:
+                import shutil
+                shutil.copy2(skill_file, target)
+    except Exception as e:
+        slog(f"[Skills] Warning: Failed to copy skills to {work_dir}: {e}")
+
+
+
 def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     f = CC_SESSIONS / f"{name}.env"
@@ -3251,6 +3281,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
     flags = cfg.get("CC_FLAGS", "")
     _ensure_memory(name, work_dir)
+    _ensure_skills(work_dir)  # Copy skills to project .cursor/skills/
     
     # Generate session-specific mcp.json
     _generate_session_mcp_json(name, work_dir)
