@@ -19069,6 +19069,15 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 env_file.unlink(missing_ok=True)
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
                 _meta_path(name).unlink(missing_ok=True)
+                
+                # Delete tasks associated with this session
+                try:
+                    db = get_db()
+                    db.execute("DELETE FROM tasks WHERE session = ?", (name,))
+                    db.commit()
+                except Exception as e:
+                    slog(f"[Session] Warning: Failed to delete tasks for session '{name}': {e}")
+                
                 return self._json({"ok": True, "message": "deleted"})
             return self._json({"error": "not found"}, 404)
 
